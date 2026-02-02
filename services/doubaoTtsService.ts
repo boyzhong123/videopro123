@@ -22,20 +22,46 @@ function isNetworkError(e: unknown): boolean {
   return /failed to fetch|network error|load failed|networkrequestfailed/i.test(msg) || msg === "Failed to fetch";
 }
 
-/** 火山引擎控制台获取：Access Key（必填） */
-const DOUBAO_TTS_ACCESS_KEY = "967f1530-77bd-4c80-a841-80d9840db772";
-/** 火山引擎控制台获取：App ID（v3 接口建议填写，否则仅用 x-api-key 尝试） */
-const DOUBAO_TTS_APP_ID = "";
+let lastTtsDebugSnippet = "";
+export function getLastTtsDebugInfo(): string {
+  return lastTtsDebugSnippet;
+}
+
+function isValidBase64(s: string): boolean {
+  const t = s.replace(/\s/g, "");
+  if (!/^[A-Za-z0-9+/]*=*$/.test(t)) return false;
+  const padded = t.length % 4 === 0 ? t : t + "==".slice(0, (4 - (t.length % 4)) % 4);
+  try {
+    atob(padded);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 火山引擎控制台获取：Access Token / Access Key（必填）。可用 VITE_DOUBAO_TTS_ACCESS_KEY 覆盖 */
+const DOUBAO_TTS_ACCESS_KEY =
+  (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_DOUBAO_TTS_ACCESS_KEY) ||
+  "bMF6HSM9By3VFGyDfw1xgKME4sgR2Eff";
+/** 火山引擎控制台获取：App ID。v3 接口要求必填，未填可能报 resource ID is mismatched。可用 VITE_DOUBAO_TTS_APP_ID 覆盖 */
+const DOUBAO_TTS_APP_ID =
+  (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_DOUBAO_TTS_APP_ID) ||
+  "1481136284";
 
 /** TTS 1.0 资源 ID（仅适用于 1.0 音色） */
 const RESOURCE_ID_TTS_1 = "volc.service_type.10029";
 const RESOURCE_ID_TTS_1_ALT = "seed-tts-1.0";
 const RESOURCE_ID_TTS_1_CONCURR = "volc.service_type.10048";
-/** TTS 2.0 资源 ID（仅适用于 2.0 音色） */
+/** TTS 2.0 资源 ID（仅适用于 2.0 音色），见 https://www.volcengine.com/docs/6561/1598757 */
 const RESOURCE_ID_TTS_2 = "seed-tts-2.0";
+/** 控制台「实例ID/名称」：仅当 seed-tts-2.0 返回 resource ID is mismatched 时再试此 ID，串行、不增加并发 */
+const TTS_2_INSTANCE_ID = "TTS-SeedTTS2.02000000601512017026";
 
-/** 是否仅使用 TTS 2.0（与控制台「豆包语音合成模型2.0」一致时设为 true） */
+/** 是否仅使用 TTS 2.0。true=先试 seed-tts-2.0，若 mismatch 再试实例 ID */
 const USE_TTS_2_ONLY = true;
+
+/** 每句 TTS 最多请求次数 */
+const MAX_TTS_ATTEMPTS = 5;
 
 /**
  * 2.0 音色（通用场景），参考：https://www.volcengine.com/docs/6561/1257544
@@ -43,7 +69,7 @@ const USE_TTS_2_ONLY = true;
  */
 export const DOUBAO_SPEAKERS = [
   { id: "zh_female_xiaohe_uranus_bigtts", label: "小何 2.0（女）" },
-  { id: "zh_female_vv_uranus_bigtts", label: "Vivi 2.0（女）" },
+  { id: "zh_female_santongyongns_saturn_bigtts", label: "流畅女声" },
   { id: "zh_male_m191_uranus_bigtts", label: "云舟 2.0（男）" },
   { id: "zh_male_taocheng_uranus_bigtts", label: "小天 2.0（男）" },
 ] as const;
@@ -68,7 +94,7 @@ export const DOUBAO_EMOTIONS = [
 
 export type DoubaoSpeakerId = (typeof DOUBAO_SPEAKERS)[number]["id"];
 
-const DEFAULT_SPEAKER: DoubaoSpeakerId = "zh_female_vv_uranus_bigtts"; // Vivi 2.0（女）
+const DEFAULT_SPEAKER: DoubaoSpeakerId = "zh_female_santongyongns_saturn_bigtts"; // 流畅女声
 
 /**
  * 调用豆包 TTS 接口（v3 单向流式），返回 MP3 的 ArrayBuffer。
@@ -79,6 +105,7 @@ async function fetchDoubaoTtsMp3(
   speaker: string = DEFAULT_SPEAKER,
   options?: { emotion?: string; emotionScale?: number }
 ): Promise<ArrayBuffer> {
+  lastTtsDebugSnippet = "";
   const audioParams: Record<string, unknown> = {
     format: "mp3",
     sample_rate: 24000,
@@ -87,11 +114,11 @@ async function fetchDoubaoTtsMp3(
     audioParams.emotion = options.emotion;
     audioParams.emotion_scale = Math.max(1, Math.min(5, options.emotionScale ?? 4));
   }
-  const body = {
+  const buildBody = (speakerId: string) => ({
     user: { uid: "gallery" },
     req_params: {
       text,
-      speaker,
+      speaker: speakerId,
       additions: JSON.stringify({
         disable_markdown_filter: true,
         enable_language_detector: true,
@@ -102,9 +129,11 @@ async function fetchDoubaoTtsMp3(
       }),
       audio_params: audioParams,
     },
-  };
+  });
 
-  const tryWithResourceId = async (resourceId: string, endpoint: string): Promise<string> => {
+  const body = buildBody(speaker);
+
+  const tryWithResourceId = async (resourceId: string, endpoint: string, requestBody = body): Promise<string> => {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-Api-Resource-Id": resourceId,
@@ -119,7 +148,7 @@ async function fetchDoubaoTtsMp3(
     const response = await fetch(endpoint, {
       method: "POST",
       headers,
-      body: JSON.stringify(body),
+      body: JSON.stringify(requestBody),
     });
 
     const rawText = await response.text();
@@ -130,6 +159,19 @@ async function fetchDoubaoTtsMp3(
     const trimmed = rawText.trim();
     if (trimmed.startsWith("<") || /<\s*!?DOCTYPE|<\s*html/i.test(trimmed)) {
       throw new Error("代理或网络返回了 HTML 页面（非 TTS 数据），请确认本页与开发服务同端口、/api/proxy 可用，或稍后重试。");
+    }
+    if (trimmed.startsWith("{")) {
+      try {
+        const o = JSON.parse(trimmed);
+        if (o && typeof o === "object" && !(o.data || o.result?.data || o.audio)) {
+          const msg = o.message ?? o.error ?? o.msg ?? o.err_msg;
+          if (typeof msg === "string" && msg.length > 0) {
+            throw new Error("豆包 TTS 接口返回错误: " + msg);
+          }
+        }
+      } catch (e) {
+        if (e instanceof Error && e.message.startsWith("豆包 TTS 接口返回错误:")) throw e;
+      }
     }
 
     const isLikelyBase64 = (s: string) => {
@@ -170,24 +212,35 @@ async function fetchDoubaoTtsMp3(
     return fullBase64;
   };
 
+  // 仅用 seed-tts-2.0，不发实例 ID，避免 403 requested resource not granted
   const resourceIds = USE_TTS_2_ONLY
     ? [RESOURCE_ID_TTS_2]
     : [RESOURCE_ID_TTS_1, RESOURCE_ID_TTS_1_ALT, RESOURCE_ID_TTS_1_CONCURR, RESOURCE_ID_TTS_2];
 
-  const endpointsToTry = [getProxyUrl(TTS_ENDPOINT), getFallbackCorsProxy() + encodeURIComponent(TTS_ENDPOINT)];
+  const endpointsToTry = [
+    getFallbackCorsProxy() + encodeURIComponent(TTS_ENDPOINT),
+    getProxyUrl(TTS_ENDPOINT),
+  ];
 
   let fullBase64 = "";
   let lastError: Error | null = null;
+  let attempts = 0;
 
   for (const resourceId of resourceIds) {
     for (const endpoint of endpointsToTry) {
+      if (attempts >= MAX_TTS_ATTEMPTS) break;
+      attempts += 1;
       try {
-        fullBase64 = await tryWithResourceId(resourceId, endpoint);
-        if (fullBase64) break;
+        const got = await tryWithResourceId(resourceId, endpoint);
+        if (got && isValidBase64(got)) {
+          fullBase64 = got;
+          break;
+        }
       } catch (e) {
         lastError = e instanceof Error ? e : new Error(String(e));
         const msg = lastError.message;
-        if (!USE_TTS_2_ONLY && (msg.includes("resource ID is mismatched") || msg.includes("55000000"))) {
+        const isResourceMismatch = /resource ID is mismatched|55000000/i.test(msg);
+        if (isResourceMismatch) {
           continue;
         }
         if (isNetworkError(e) && endpoint === endpointsToTry[0]) {
@@ -210,16 +263,25 @@ async function fetchDoubaoTtsMp3(
 
   const cleanBase64 = fullBase64.replace(/\s/g, "");
   if (!/^[A-Za-z0-9+/]*=*$/.test(cleanBase64)) {
+    lastTtsDebugSnippet = "[TTS 返回片段，前 500 字符]\n" + cleanBase64.slice(0, 500);
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn("[TTS] 代理返回非 Base64，前 300 字符:", cleanBase64.slice(0, 300));
+    }
     throw new Error(
-      "豆包 TTS 返回的数据不是有效的 Base64 音频。可能是代理或网络返回了错误页（如 HTML），请检查：1) 本页与开发服务是否同端口；2) /api/proxy 是否正常；3) 稍后重试。"
+      "豆包 TTS 返回的数据不是有效的 Base64 音频。可能是代理或网络返回了错误页（如 HTML），请检查：1) 本页与开发服务是否同端口；2) /api/proxy 是否正常；3) 豆包 TTS 的 API Key 是否有效；4) 稍后重试。"
     );
   }
+  const padded = cleanBase64.length % 4 === 0 ? cleanBase64 : cleanBase64 + "==".slice(0, (4 - (cleanBase64.length % 4)) % 4);
   let binaryString: string;
   try {
-    binaryString = atob(cleanBase64);
+    binaryString = atob(padded);
   } catch {
+    lastTtsDebugSnippet = "[TTS 返回片段，前 500 字符]\n" + cleanBase64.slice(0, 500);
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn("[TTS] Base64 解码失败，前 300 字符:", cleanBase64.slice(0, 300));
+    }
     throw new Error(
-      "豆包 TTS 返回的数据不是有效的 Base64 音频。可能是代理或网络返回了错误页（如 HTML），请检查：1) 本页与开发服务是否同端口；2) /api/proxy 是否正常；3) 稍后重试。"
+      "豆包 TTS 返回的数据不是有效的 Base64 音频。可能是代理或网络返回了错误页（如 HTML），请检查：1) 本页与开发服务是否同端口；2) /api/proxy 是否正常；3) 豆包 TTS 的 API Key 是否有效；4) 稍后重试。"
     );
   }
   const len = binaryString.length;

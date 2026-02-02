@@ -40,7 +40,11 @@ export default defineConfig(({ mode }) => {
                 fetch(target, { method, headers, body })
                   .then((r) => {
                     res.statusCode = r.status;
-                    r.headers.forEach((v, k) => res.setHeader(k, v));
+                    r.headers.forEach((v, k) => {
+                      const lower = k.toLowerCase();
+                      if (lower === "content-encoding" || lower === "transfer-encoding") return;
+                      res.setHeader(k, v);
+                    });
                     return r.arrayBuffer();
                   })
                   .then((buf) => res.end(Buffer.from(buf)))

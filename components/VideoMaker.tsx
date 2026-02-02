@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { generateSpeech } from '../services/geminiService';
-import { DOUBAO_SPEAKERS, DOUBAO_EMOTIONS } from '../services/doubaoTtsService';
+import { DOUBAO_SPEAKERS, DOUBAO_EMOTIONS, getLastTtsDebugInfo } from '../services/doubaoTtsService';
 import { GeneratedItem } from '../types';
 
 interface VideoMakerProps {
@@ -69,17 +69,19 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
   const [videoMimeType, setVideoMimeType] = useState<string>('');
   const [progress, setProgress] = useState(0);
   
-  const [selectedSpeaker, setSelectedSpeaker] = useState('zh_female_vv_uranus_bigtts'); // 默认 Vivi 2.0（女）
+  const [selectedSpeaker, setSelectedSpeaker] = useState('zh_female_santongyongns_saturn_bigtts'); // 默认 流畅女声（与 doubaoTtsService 一致，避免列表第一项与默认不一致导致传错 ID）
   const [selectedEmotion, setSelectedEmotion] = useState('authoritative'); // 默认 权威
   const [selectedSpeed, setSelectedSpeed] = useState(1.0);
   const [selectedMusic, setSelectedMusic] = useState('mixkit-classical-10-717'); // 默认 古典钢琴叙事
-  const [bgmVolume, setBgmVolume] = useState(60); // 滑块 0–100，实际音量 = 滑块% × 40%（最大原音 40%），默认 60 即原音 24%
+  const [bgmVolume, setBgmVolume] = useState(50); // 滑块 0–100，实际音量 = 滑块% × 40%（最大原音 40%），默认 50%
 
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
   const [isVoicePreviewLoading, setIsVoicePreviewLoading] = useState(false);
   const [isMusicPreviewLoading, setIsMusicPreviewLoading] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  
+  const [lastErrorDetail, setLastErrorDetail] = useState<string | null>(null);
+  const [showDiagnostic, setShowDiagnostic] = useState(false);
+
   const audioPreviewRef = useRef<HTMLAudioElement | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -338,6 +340,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
     setVideoUrl(null);
     setVideoMimeType('');
     setProgress(0);
+    setLastErrorDetail(null);
 
     let renderTimerId: ReturnType<typeof setTimeout> | undefined;
     let audioCtx: AudioContext | null = null;
@@ -378,9 +381,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
         const view = new Int16Array(segmentBuffers[i]);
         combined.set(view, offset);
         offset += view.length;
-        if (i < segmentBuffers.length - 1) {
-          offset += silenceSamples; // 静音已为 0，无需 fill
-        }
+        if (i < segmentBuffers.length - 1) offset += silenceSamples;
       }
       const voiceBufferData = combined.buffer;
 
@@ -738,10 +739,19 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       console.error("Video creation failed", error);
       setStatus('idle');
       const msg = error instanceof Error ? error.message : String(error);
+      const ttsSnippet = getLastTtsDebugInfo();
+      const detail = ttsSnippet ? msg + "\n\n" + ttsSnippet : msg;
+      setLastErrorDetail(detail);
       const isFailedFetch = /failed to fetch|network error|load failed/i.test(msg) || msg === "Failed to fetch";
-      const hint = isFailedFetch
-        ? "原因: " + msg + "\n\n建议：1) 确认本页与开发服务同一端口（如均为 localhost:3000）；2) 检查网络与防火墙；3) 若使用代理，请确认 /api/proxy 可用。"
-        : "原因: " + msg;
+      const isConcurrency = /quota exceeded.*concurrency|concurrency.*quota/i.test(msg);
+      let hint: string;
+      if (isFailedFetch) {
+        hint = "原因: " + msg + "\n\n建议：1) 确认本页与开发服务同一端口（如均为 localhost:3000）；2) 检查网络与防火墙；3) 若使用代理，请确认 /api/proxy 可用。";
+      } else if (isConcurrency) {
+        hint = "原因: " + msg + "\n\n建议：1) 在火山引擎控制台确认「豆包语音合成」服务开通为「开通」（非暂停）；2) 确认该实例「并发限额」实际≥1（「10 增购并发」可能表示可购买数）；3) 关闭其他使用同一 Key 的页面或应用后重试。";
+      } else {
+        hint = "原因: " + msg;
+      }
       alert("视频合成遇到问题，请重试。\n\n" + hint);
       if (audioCtx) audioCtx.close();
       if (typeof renderTimerId !== 'undefined') clearTimeout(renderTimerId);
@@ -755,6 +765,36 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       <div className="absolute top-0 right-0 w-64 h-64 bg-slate-800/5 rounded-full blur-3xl -z-0 pointer-events-none"></div>
 
       <div className="flex flex-col gap-8 relative z-10">
+        {lastErrorDetail && (
+          <div className="rounded-sm border border-amber-900/50 bg-amber-950/20 p-3">
+            <button
+              type="button"
+              onClick={() => setShowDiagnostic((v) => !v)}
+              className="flex items-center gap-2 text-amber-200 hover:text-amber-100 text-sm font-medium"
+            >
+              <span>{showDiagnostic ? '▼' : '▶'}</span>
+              <span>查看诊断信息（便于复制给开发者）</span>
+            </button>
+            {showDiagnostic && (
+              <div className="mt-3 flex flex-col gap-2">
+                <pre className="text-xs text-slate-300 bg-black/40 p-3 rounded overflow-x-auto whitespace-pre-wrap break-all max-h-48 overflow-y-auto">
+                  {lastErrorDetail}
+                </pre>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(lastErrorDetail).then(() => setToastMessage('已复制到剪贴板')).catch(() => setToastMessage('复制失败'));
+                    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+                    toastTimerRef.current = setTimeout(() => { setToastMessage(null); toastTimerRef.current = null; }, 2000);
+                  }}
+                  className="self-end px-3 py-1.5 text-xs bg-[#222] hover:bg-[#333] text-amber-200 rounded"
+                >
+                  复制
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         <div className="flex flex-col md:flex-row items-center justify-between gap-8 border-b border-[#222] pb-6">
           <div>
             <h3 className="text-2xl font-serif italic text-white flex items-center gap-3">
@@ -829,6 +869,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
                         ))}
                     </select>
                 </div>
+
             </div>
 
             <div className="flex flex-wrap items-center gap-3 justify-end w-full relative">

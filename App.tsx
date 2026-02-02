@@ -6,6 +6,13 @@ import VideoMaker from './components/VideoMaker';
 import { generateCreativePrompts, generateImageFromPrompt } from './services/geminiService';
 import { GeneratedItem } from './types';
 
+const PRESET_IMAGE_URLS = [
+  'https://picsum.photos/seed/p1/800/600',
+  'https://picsum.photos/seed/p2/800/600',
+  'https://picsum.photos/seed/p3/800/600',
+  'https://picsum.photos/seed/p4/800/600',
+];
+
 const App: React.FC = () => {
   const [items, setItems] = useState<GeneratedItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -13,6 +20,17 @@ const App: React.FC = () => {
   const [currentRatio, setCurrentRatio] = useState('4:3');
   const [currentStyle, setCurrentStyle] = useState('Photorealistic');
   const [currentView, setCurrentView] = useState('Default');
+
+  const loadPresetImages = useCallback(() => {
+    const presetItems: GeneratedItem[] = PRESET_IMAGE_URLS.map((imageUrl, index) => ({
+      id: (index + 1).toString(),
+      prompt: `预设图 ${index + 1}`,
+      imageUrl,
+      loading: false,
+    }));
+    setItems(presetItems);
+    setLastInputText(prev => (prev.trim() ? prev : '这是一段测试文案，用于验证语音合成与视频合成。'));
+  }, []);
 
   const handleGenerate = useCallback(async (inputText: string, style: string, aspectRatio: string, count: number, viewDistance: string) => {
     setIsProcessing(true);
@@ -95,6 +113,19 @@ const App: React.FC = () => {
     <div className="min-h-screen text-slate-200 selection:bg-[#d4af37] selection:text-black">
       <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-12">
         <Header />
+
+        <div className="mb-6 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={loadPresetImages}
+            disabled={isProcessing}
+            className="text-sm text-slate-500 hover:text-[#d4af37] border border-[#333] hover:border-[#d4af37]/50 px-4 py-2 rounded transition-colors disabled:opacity-50"
+            title="加载 4 张预设图，不调用作图接口，可直接测视频/语音合成"
+          >
+            使用预设 4 张图（不花钱测合成）
+          </button>
+          <span className="text-xs text-slate-600">若文案为空会填入测试句，可直接到下方「Video Production」开始合成</span>
+        </div>
         
         <InputArea onGenerate={handleGenerate} isLoading={isProcessing} />
 
