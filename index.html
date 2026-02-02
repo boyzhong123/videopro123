@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>听说在线 灵感画廊</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+    <style>
+      body {
+        font-family: 'Noto Sans SC', sans-serif;
+        background-color: #050505; /* Very dark black */
+        color: #e5e5e5;
+      }
+      
+      .font-serif {
+        font-family: 'Playfair Display', serif;
+      }
+      
+      /* Premium Gallery Background */
+      .creative-bg {
+        background-color: #050505;
+        background-image: 
+          radial-gradient(circle at 50% 0%, rgba(50, 50, 60, 0.4) 0%, transparent 60%),
+          linear-gradient(to bottom, rgba(255,255,255,0.02) 1px, transparent 1px),
+          linear-gradient(to right, rgba(255,255,255,0.02) 1px, transparent 1px);
+        background-size: 100% 100%, 40px 40px, 40px 40px;
+        min-height: 100vh;
+      }
+
+      /* Subtle Gold Glow for accents */
+      .gold-glow {
+        box-shadow: 0 0 15px rgba(212, 175, 55, 0.15);
+      }
+
+      /* Custom Scrollbar */
+      .custom-scrollbar::-webkit-scrollbar {
+        width: 4px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-track {
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.15);
+        border-radius: 2px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.3);
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "@google/genai": "https://esm.sh/@google/genai@^1.39.0",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "react/": "https://esm.sh/react@^19.2.4/",
+    "react": "https://esm.sh/react@^19.2.4"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="creative-bg">
+    <div id="root" class="relative z-10"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>

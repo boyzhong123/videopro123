@@ -1,0 +1,5 @@
+{
+  "name": "听说在线 灵感画廊",
+  "description": "输入一段英文描述，自动生成多个优化后的绘画提示词 (Gemini)，并利用 豆包 (Doubao) Seedream 模型生成对应的精美图片。",
+  "requestFramePermissions": []
+}
