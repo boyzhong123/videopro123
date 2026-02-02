@@ -71,9 +71,9 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
   
   const [selectedSpeaker, setSelectedSpeaker] = useState('zh_female_santongyongns_saturn_bigtts'); // 默认 流畅女声（与 doubaoTtsService 一致，避免列表第一项与默认不一致导致传错 ID）
   const [selectedEmotion, setSelectedEmotion] = useState('authoritative'); // 默认 权威
-  const [selectedSpeed, setSelectedSpeed] = useState(1.0);
+  const [selectedSpeed, setSelectedSpeed] = useState(0.85);
   const [selectedMusic, setSelectedMusic] = useState('mixkit-classical-10-717'); // 默认 古典钢琴叙事
-  const [bgmVolume, setBgmVolume] = useState(50); // 滑块 0–100，实际音量 = 滑块% × 40%（最大原音 40%），默认 50%
+  const [bgmVolume, setBgmVolume] = useState(60); // 滑块 0–100，实际音量 = 滑块% × 40%（最大原音 40%），默认 60%
 
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
   const [isVoicePreviewLoading, setIsVoicePreviewLoading] = useState(false);
@@ -99,18 +99,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
   
   const validImages = images.filter(img => img.imageUrl && !img.loading && !img.error);
 
-  useEffect(() => {
-    let suggestedMusic = 'none';
-    const s = style.toLowerCase();
-    if (s.includes('cyberpunk') || s.includes('3d') || s.includes('pixel') || s.includes('anime')) suggestedMusic = 'mixkit-upbeat-jazz-644';
-    else if (s.includes('watercolor') || s.includes('minimalist') || s.includes('nature')) suggestedMusic = 'mixkit-classical-vibes-2-682';
-    else if (s.includes('oil') || s.includes('photo')) suggestedMusic = 'mixkit-classical-vibes-4-684';
-    else if (s.includes('chinese') || s.includes('ink')) suggestedMusic = 'mixkit-classical-10-717';
-    else if (s.includes('modern')) suggestedMusic = 'mixkit-classical-vibes-5-688';
-    else suggestedMusic = 'mixkit-classical-10-717';
-    if (BGM_TRACKS.some(t => t.id === suggestedMusic)) setSelectedMusic(suggestedMusic);
-    else setSelectedMusic(BGM_TRACKS[1]?.id ?? 'none');
-  }, [style]);
+  // 不再根据 style 自动覆盖 BGM，保持默认「古典钢琴叙事」生效
 
   useEffect(() => {
     if (audioPreviewRef.current) {
