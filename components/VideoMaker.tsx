@@ -217,7 +217,9 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       source.start(0);
       setTimeout(() => setIsVoicePreviewLoading(false), audioBuffer.duration * 1000);
     } catch (e) {
-      alert("Voice preview failed.");
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("Voice preview error:", e);
+      alert("语音试听失败:\n" + msg);
       setIsVoicePreviewLoading(false);
     }
   };

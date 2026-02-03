@@ -126,8 +126,19 @@ async function fetchDoubaoTtsMp3(
     getProxyUrl(TTS_ENDPOINT),
   ];
 
-  let fullBase64 = "";
+  // 收集所有 Base64 片段，稍后分别解码
+  const base64Chunks: string[] = [];
   let lastError: Error | null = null;
+
+  // 安全解码单个 Base64 片段
+  const decodeBase64Chunk = (b64: string): Uint8Array => {
+    const clean = b64.replace(/\s/g, "");
+    const padded = clean.length % 4 === 0 ? clean : clean + "=".repeat((4 - (clean.length % 4)) % 4);
+    const bin = atob(padded);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return arr;
+  };
 
   for (const endpoint of endpointsToTry) {
     try {
@@ -164,33 +175,33 @@ async function fetchDoubaoTtsMp3(
             throw new Error(`音色与资源不匹配 (55000000): ${obj.message}，请确认控制台已开通对应 1.0 音色。`);
           }
           if (obj.data && typeof obj.data === "string" && isLikelyBase64(obj.data)) {
-            fullBase64 += obj.data;
+            base64Chunks.push(obj.data);
           }
         } catch (e) {
           if (e instanceof Error && e.message.startsWith("音色与资源不匹配")) throw e;
         }
       }
 
-      if (!fullBase64 && trimmed) {
+      if (base64Chunks.length === 0 && trimmed) {
         try {
           const single = JSON.parse(rawText);
           if (single?.code === 55000000 && single?.message) {
             throw new Error(`音色与资源不匹配 (55000000): ${single.message}`);
           }
           const d = single?.data ?? single?.result?.data ?? single?.audio;
-          if (d && typeof d === "string" && isLikelyBase64(d)) fullBase64 = d;
+          if (d && typeof d === "string" && isLikelyBase64(d)) base64Chunks.push(d);
         } catch (e) {
           if (e instanceof Error && e.message.startsWith("音色与资源不匹配")) throw e;
         }
       }
 
-      if (fullBase64 && isValidBase64(fullBase64)) break;
+      if (base64Chunks.length > 0) break;
     } catch (e) {
       lastError = e instanceof Error ? e : new Error(String(e));
     }
   }
 
-  if (!fullBase64) {
+  if (base64Chunks.length === 0) {
     const debug = lastTtsDebugSnippet ? "\n\n最近响应片段：\n" + lastTtsDebugSnippet : "";
     throw new Error(
       "豆包 TTS 未返回音频。" +
@@ -200,15 +211,32 @@ async function fetchDoubaoTtsMp3(
     );
   }
 
-  const cleanBase64 = fullBase64.replace(/\s/g, "");
-  if (!/^[A-Za-z0-9+/]*=*$/.test(cleanBase64)) {
-    throw new Error("TTS 返回数据不是有效 Base64 音频，请检查代理与 Key。");
+  // 分别解码每个 Base64 片段，然后拼接二进制数据
+  const binaryChunks: Uint8Array[] = [];
+  for (let i = 0; i < base64Chunks.length; i++) {
+    try {
+      binaryChunks.push(decodeBase64Chunk(base64Chunks[i]));
+    } catch (e) {
+      console.error(`[TTS] Failed to decode chunk ${i}:`, {
+        length: base64Chunks[i].length,
+        first30: base64Chunks[i].slice(0, 30),
+        last30: base64Chunks[i].slice(-30),
+        error: e,
+      });
+      throw new Error(`TTS 音频片段 ${i + 1}/${base64Chunks.length} 解码失败，请重试。`);
+    }
   }
-  const padded = cleanBase64.length % 4 === 0 ? cleanBase64 : cleanBase64 + "==".slice(0, (4 - (cleanBase64.length % 4)) % 4);
-  const binaryString = atob(padded);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-  return bytes.buffer;
+
+  // 合并所有二进制数据
+  const totalLength = binaryChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const combined = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of binaryChunks) {
+    combined.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return combined.buffer;
 }
 
 async function decodeMp3ToPcm24k(mp3Buffer: ArrayBuffer): Promise<ArrayBuffer> {
