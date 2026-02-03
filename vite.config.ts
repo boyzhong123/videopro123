@@ -165,7 +165,8 @@ export default defineConfig(({ mode }) => {
 
                   r.headers.forEach((v, k) => {
                     const lower = k.toLowerCase();
-                    if (lower === 'content-encoding' || lower === 'transfer-encoding') return;
+                    // Skip content-length: Volcano API returns incorrect value, let Express auto-calculate
+                    if (lower === 'content-encoding' || lower === 'transfer-encoding' || lower === 'content-length') return;
                     res.setHeader(k, v);
                   });
 
