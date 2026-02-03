@@ -74,6 +74,11 @@ app.post("/api/tts/fangzhou", async (req, res) => {
 app.all("/api/proxy", async (req, res) => {
   const url = req.query?.url;
   if (typeof url !== "string") {
+    // Health check: GET /api/proxy without url parameter
+    if (req.method === "GET" && !url) {
+      res.status(200).end("proxy ok");
+      return;
+    }
     res.status(400).end("Missing url");
     return;
   }
@@ -93,22 +98,123 @@ app.all("/api/proxy", async (req, res) => {
   if (req.headers["x-api-app-id"]) headers["X-Api-App-Id"] = req.headers["x-api-app-id"];
   if (req.headers["x-api-access-key"]) headers["X-Api-Access-Key"] = req.headers["x-api-access-key"];
   if (req.headers["x-api-key"]) headers["X-Api-Key"] = req.headers["x-api-key"];
+  // 拉取 Volces/TOS 签名图片时：仅带 Accept，不转发 Referer，避免 CDN 403
+  const isVolcesImage = method === "GET" && /volces\.com|tos-cn-beijing/i.test(target);
+  if (isVolcesImage) {
+    headers["Accept"] = "image/*,*/*";
+    headers["User-Agent"] = "Mozilla/5.0 (compatible; ImageProxy/1.0)";
+  }
   const body = method === "POST" && req.body != null ? (typeof req.body === "string" ? req.body : JSON.stringify(req.body)) : undefined;
+  
+  let lastError = null;
+  let r = null;
+  
+  // Try up to 3 times with different configurations
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      console.log(`[Proxy] Attempt ${attempt}/3: ${method} ${target.slice(0, 80)}...`);
+      
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 120000);
+      
+      // Add more fetch options for better compatibility
+      const fetchOptions = {
+        method,
+        headers,
+        body,
+        signal: controller.signal,
+        // Disable HTTP/2 which might cause issues
+        ...(global.fetch?.length > 1 ? {} : { duplex: 'half' })
+      };
+      
+      r = await fetch(target, fetchOptions);
+      clearTimeout(t);
+      console.log(`[Proxy] Attempt ${attempt} succeeded: ${r.status}`);
+      break; // Success!
+      
+    } catch (e) {
+      lastError = e;
+      console.error(`[Proxy] Attempt ${attempt} failed:`, e.message);
+      
+      if (attempt < 3) {
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+      }
+    }
+  }
+  
+  if (!r) {
+    console.error(`[Proxy] All attempts failed. Last error:`, lastError?.message || lastError);
+    res.status(502).setHeader("Content-Type", "text/plain; charset=utf-8").end(`Proxy error: ${lastError?.message || 'fetch failed'}`);
+    return;
+  }
+  
   try {
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), 120000);
-    const r = await fetch(target, { method, headers, body, signal: controller.signal });
-    clearTimeout(t);
+    
+    // Set status and headers first
     res.status(r.status);
     r.headers.forEach((v, k) => {
       const lower = String(k).toLowerCase();
-      if (lower === "content-encoding" || lower === "transfer-encoding") return;
+      // Skip headers that could cause mismatch with actual content
+      if (lower === "content-encoding" || lower === "transfer-encoding" || lower === "content-length") return;
       res.setHeader(k, v);
     });
-    const buf = await r.arrayBuffer();
-    res.end(Buffer.from(buf));
+    
+    // Use streaming to handle large responses more reliably
+    if (!r.body) {
+      console.log(`[Proxy] No response body`);
+      res.end();
+      return;
+    }
+    
+    const reader = r.body.getReader();
+    const chunks = [];
+    let totalLength = 0;
+    let chunkCount = 0;
+    
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          console.log(`[Proxy] Stream complete after ${chunkCount} chunks`);
+          break;
+        }
+        if (value) {
+          chunks.push(value);
+          totalLength += value.length;
+          chunkCount++;
+        }
+      }
+      
+      // Combine all chunks
+      const combined = new Uint8Array(totalLength);
+      let position = 0;
+      for (const chunk of chunks) {
+        combined.set(chunk, position);
+        position += chunk.length;
+      }
+      
+      // Log response size for debugging
+      const contentType = r.headers.get('content-type') || 'unknown';
+      console.log(`[Proxy] ${method} ${target.slice(0, 60)}... -> ${r.status} (${totalLength} bytes, ${chunkCount} chunks, ${contentType})`);
+      
+      // For JSON responses, log first/last parts to verify completeness
+      if (contentType.includes('json')) {
+        const text = new TextDecoder().decode(combined);
+        console.log(`[Proxy] JSON response: ${text.length} chars, starts: ${text.slice(0, 50)}, ends: ${text.slice(-50)}`);
+      }
+      
+      res.end(Buffer.from(combined));
+    } catch (readError) {
+      console.error(`[Proxy] Stream read error:`, readError);
+      if (!res.headersSent) {
+        res.status(502).setHeader("Content-Type", "text/plain; charset=utf-8").end(`Stream error: ${readError.message}`);
+      }
+    }
   } catch (e) {
-    res.status(502).setHeader("Content-Type", "text/plain; charset=utf-8").end(String(e?.message || e));
+    console.error(`[Proxy] Response processing failed:`, e?.message || e);
+    if (!res.headersSent && !res.writableEnded) {
+      res.status(502).setHeader("Content-Type", "text/plain; charset=utf-8").end(String(e?.message || e));
+    }
   }
 });
 

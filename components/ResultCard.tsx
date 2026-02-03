@@ -9,6 +9,8 @@ interface ResultCardProps {
 }
 
 const ResultCard: React.FC<ResultCardProps> = ({ item, aspectRatio, onRetry, onImageError }) => {
+  const errorDetail = item.errorDetail;
+  const copyableError = [item.error, errorDetail].filter(Boolean).join('\n\n');
   // Use CSS aspectRatio property (e.g., "16/9")
   const ratioStyle = aspectRatio.replace(':', '/');
 
@@ -45,11 +47,23 @@ const ResultCard: React.FC<ResultCardProps> = ({ item, aspectRatio, onRetry, onI
                 <span className="text-xs font-serif italic tracking-wider opacity-60">Painting in progress...</span>
               </div>
             ) : item.error ? (
-              <div className="flex flex-col items-center justify-center gap-4 p-6 text-center w-full h-full bg-[#1a0f0f]">
+              <div className="flex flex-col items-center justify-center gap-3 p-4 text-center w-full h-full bg-[#1a0f0f] overflow-y-auto">
                 <p className="text-red-900/80 font-serif italic text-sm">Creation Failed</p>
                 {item.error && item.error !== "Image generation failed" && (
-                  <p className="text-slate-500 text-[10px] max-w-[90%] leading-relaxed">{item.error}</p>
+                  <p className="text-slate-500 text-[10px] max-w-[95%] leading-relaxed text-left">{item.error}</p>
                 )}
+                {errorDetail && (
+                  <pre className="text-[10px] text-slate-500 bg-black/40 p-2 rounded max-h-24 overflow-auto text-left w-[95%] whitespace-pre-wrap break-all border border-[#333]">
+                    {errorDetail}
+                  </pre>
+                )}
+                <button
+                  type="button"
+                  onClick={() => navigator.clipboard.writeText(copyableError).then(() => alert('已复制到剪贴板，可直接粘贴给开发者'))}
+                  className="text-[10px] text-amber-400 hover:text-amber-300 border border-amber-600/50 hover:border-amber-500 px-3 py-1.5 rounded transition-colors"
+                >
+                  📋 复制报错信息（可粘贴给开发者）
+                </button>
                 <button 
                   onClick={() => onRetry(item.id)}
                   className="px-5 py-2.5 text-xs bg-red-900/20 border border-red-900/50 text-red-400 hover:bg-red-900/40 hover:text-white transition-all uppercase tracking-widest shadow-[0_0_15px_rgba(255,0,0,0.1)] hover:shadow-[0_0_20px_rgba(255,0,0,0.2)]"

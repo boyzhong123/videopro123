@@ -405,19 +405,32 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
           im.crossOrigin = "anonymous";
           const safeUrl = item.imageUrl || "";
 
-          // 使用 PROXY 获取 Blob，避免直接跨域导致的 Canvas Tainted 问题
+          // 先直连再代理：Volces 签名图直连常可成功，代理易被拦截或服务端拒绝
           const fetchImageBlob = async (url: string) => {
-            try {
-              // 优先尝试代理
-              const proxyUrl = getProxyUrl(url);
-              const res = await fetch(proxyUrl);
-              if (!res.ok) throw new Error(`Proxy Fetch Failed: ${res.status}`);
-              const blob = await res.blob();
+            const useBlob = (blob: Blob) => {
               const blobUrl = URL.createObjectURL(blob);
               im.src = blobUrl;
+            };
+            try {
+              // 1) 优先直连（Volces/TOS 签名 URL 在浏览器侧常可成功，避免 /api/proxy 失败）
+              const direct = await fetch(url, { mode: 'cors' });
+              if (direct.ok) {
+                const blob = await direct.blob();
+                if (blob.type.startsWith('image/')) {
+                  useBlob(blob);
+                  return;
+                }
+              }
+            } catch (_) {}
+            try {
+              // 2) 直连失败时走同源代理
+              const proxyUrl = getProxyUrl(url);
+              const res = await fetch(proxyUrl);
+              if (!res.ok) throw new Error(`Proxy: ${res.status}`);
+              const blob = await res.blob();
+              useBlob(blob);
             } catch (e) {
-              console.warn("Proxy image load failed, trying direct:", e);
-              // 降级尝试直连（如果 API 允许跨域）
+              console.warn("Proxy image load failed, trying direct img src:", e);
               im.src = url;
             }
           };
@@ -804,7 +817,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
     }
   };
 
-  if (validImages.length < 2) return null;
+  if (validImages.length < 1) return null;
 
   return (
     <div className="mt-24 bg-[#0a0a0a] border border-[#222] rounded-sm p-8 text-white shadow-2xl relative overflow-hidden">

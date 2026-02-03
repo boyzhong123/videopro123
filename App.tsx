@@ -3,7 +3,7 @@ import Header from './components/Header';
 import InputArea from './components/InputArea';
 import ResultCard from './components/ResultCard';
 import VideoMaker from './components/VideoMaker';
-import { generateCreativePrompts, generateImageFromPrompt } from './services/geminiService';
+import { generateCreativePrompts, generateImageFromPrompt, getLastImageGenDebugInfo } from './services/geminiService';
 import { checkProxyHealth, type ProxyHealthStatus } from './utils/proxyHealthCheck';
 import { GeneratedItem } from './types';
 
@@ -88,10 +88,11 @@ const App: React.FC = () => {
     } catch (error) {
       console.error(`Failed to generate image for id ${id}`, error);
       const message = error instanceof Error ? error.message : "Image generation failed";
+      const detail = getLastImageGenDebugInfo() || (error instanceof Error ? error.stack : String(error));
       setItems(currentItems =>
         currentItems.map(item =>
           item.id === id
-            ? { ...item, loading: false, error: message }
+            ? { ...item, loading: false, error: message, errorDetail: detail }
             : item
         )
       );
@@ -100,11 +101,17 @@ const App: React.FC = () => {
 
   const handleImageLoadError = useCallback((id: string) => {
     setItems(currentItems =>
-      currentItems.map(item =>
-        item.id === id
-          ? { ...item, imageUrl: undefined, error: '图片加载失败，请点击重试', loading: false }
-          : item
-      )
+      currentItems.map(item => {
+        if (item.id !== id) return item;
+        const failedUrl = item.imageUrl;
+        return {
+          ...item,
+          imageUrl: undefined,
+          error: '图片加载失败，请点击重试',
+          errorDetail: failedUrl ? `加载失败的图片 URL:\n${failedUrl}` : undefined,
+          loading: false,
+        };
+      })
     );
   }, []);
 
@@ -117,7 +124,7 @@ const App: React.FC = () => {
     setItems(currentItems =>
       currentItems.map(item =>
         item.id === id
-          ? { ...item, loading: true, error: undefined, imageUrl: undefined }
+          ? { ...item, loading: true, error: undefined, errorDetail: undefined, imageUrl: undefined }
           : item
       )
     );

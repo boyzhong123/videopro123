@@ -135,31 +135,80 @@ export default defineConfig(({ mode }) => {
               if (req.headers['x-api-app-id']) headers['X-Api-App-Id'] = req.headers['x-api-app-id'] as string;
               if (req.headers['x-api-access-key']) headers['X-Api-Access-Key'] = req.headers['x-api-access-key'] as string;
               if (req.headers['x-api-key']) headers['X-Api-Key'] = req.headers['x-api-key'] as string;
+              // 拉取 Volces/TOS 签名图片时：仅带 Accept，避免 CDN 403
+              if (method === 'GET' && /volces\.com|tos-cn-beijing/i.test(target)) {
+                headers['Accept'] = 'image/*,*/*';
+                headers['User-Agent'] = 'Mozilla/5.0 (compatible; ImageProxy/1.0)';
+              }
 
-              const doFetch = (body: string | undefined) => {
+              const doFetch = async (body: string | undefined) => {
                 try {
                   const u = new URL(target);
                   console.log(`[api-proxy] ${method} ${u.host} body=${method === 'POST' ? (body ? `${body.length}B` : 'none') : '-'}`);
                 } catch (_) {}
-                fetch(target, { method, headers, body })
-                  .then((r) => {
-                    res.statusCode = r.status;
-                    res.setHeader('X-Proxied-By', 'vite-api-proxy');
-                    r.headers.forEach((v, k) => {
-                      const lower = k.toLowerCase();
-                      if (lower === 'content-encoding' || lower === 'transfer-encoding') return;
-                      res.setHeader(k, v);
-                    });
-                    return r.arrayBuffer();
-                  })
-                  .then((buf) => res.end(Buffer.from(buf)))
-                  .catch((e) => {
-                    if (!res.writableEnded) {
-                      res.statusCode = 502;
-                      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-                      res.end('Proxy error: ' + String(e?.message ?? e));
-                    }
+
+                // 图片生成 API 可能耗时较长，设置 180 秒超时
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => {
+                  console.error('[api-proxy] Request timeout after 180s');
+                  controller.abort();
+                }, 180000);
+
+                try {
+                  const r = await fetch(target, { method, headers, body, signal: controller.signal });
+                  clearTimeout(timeoutId);
+
+                  res.statusCode = r.status;
+                  res.setHeader('X-Proxied-By', 'vite-api-proxy');
+                  const contentLength = r.headers.get('content-length');
+                  console.log(`[api-proxy] Response ${r.status}, Content-Length: ${contentLength || 'unknown'}`);
+
+                  r.headers.forEach((v, k) => {
+                    const lower = k.toLowerCase();
+                    if (lower === 'content-encoding' || lower === 'transfer-encoding') return;
+                    res.setHeader(k, v);
                   });
+
+                  // 使用流式读取确保完整接收响应
+                  const reader = r.body?.getReader();
+                  if (!reader) {
+                    const buf = await r.arrayBuffer();
+                    console.log(`[api-proxy] Received ${buf.byteLength} bytes (arrayBuffer)`);
+                    res.end(Buffer.from(buf));
+                    return;
+                  }
+
+                  const chunks: Uint8Array[] = [];
+                  let totalBytes = 0;
+                  while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    if (value) {
+                      chunks.push(value);
+                      totalBytes += value.length;
+                    }
+                  }
+
+                  const combined = new Uint8Array(totalBytes);
+                  let offset = 0;
+                  for (const chunk of chunks) {
+                    combined.set(chunk, offset);
+                    offset += chunk.length;
+                  }
+
+                  console.log(`[api-proxy] Received ${totalBytes} bytes (stream)`);
+                  res.end(Buffer.from(combined));
+
+                } catch (e: any) {
+                  clearTimeout(timeoutId);
+                  console.error('[api-proxy] Error:', e?.message || e);
+                  if (!res.writableEnded) {
+                    res.statusCode = 502;
+                    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+                    const msg = e?.name === 'AbortError' ? 'Request timeout (180s)' : String(e?.message ?? e);
+                    res.end('Proxy error: ' + msg);
+                  }
+                }
               };
 
               if (method !== 'POST') {

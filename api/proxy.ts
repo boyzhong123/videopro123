@@ -27,16 +27,55 @@ export default async function proxyHandler(req: any, res: any) {
     if (h["x-api-key"]) headers["x-api-key"] = Array.isArray(h["x-api-key"]) ? h["x-api-key"][0] : h["x-api-key"];
     if (h.connection) headers["Connection"] = Array.isArray(h.connection) ? h.connection[0] : h.connection;
     const body = method === "POST" && req.body != null ? (typeof req.body === "string" ? req.body : JSON.stringify(req.body)) : undefined;
-    const r = await fetch(target, { method, headers, body });
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
+    const r = await fetch(target, { method, headers, body, signal: controller.signal });
+    clearTimeout(timeoutId);
+    
     res.status(r.status);
     r.headers.forEach((v, k) => {
       const lower = String(k).toLowerCase();
       if (lower === "content-encoding" || lower === "transfer-encoding") return;
       res.setHeader(k, v);
     });
-    const buf = await r.arrayBuffer();
-    res.end(Buffer.from(buf));
+    
+    // Use streaming to handle large responses more reliably
+    if (!r.body) {
+      res.end();
+      return;
+    }
+    
+    const reader = r.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalLength = 0;
+    
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          totalLength += value.length;
+        }
+      }
+      
+      // Combine all chunks
+      const combined = new Uint8Array(totalLength);
+      let position = 0;
+      for (const chunk of chunks) {
+        combined.set(chunk, position);
+        position += chunk.length;
+      }
+      
+      console.log(`[Proxy] ${method} ${target.substring(0, 80)} -> ${r.status} (${totalLength} bytes)`);
+      res.end(Buffer.from(combined));
+    } catch (readError) {
+      console.error(`[Proxy] Stream read error:`, readError);
+      throw readError;
+    }
   } catch (e) {
+    console.error(`[Proxy] Request failed:`, e);
     res.status(502).end(String(e));
   }
 }

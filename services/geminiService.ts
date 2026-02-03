@@ -141,16 +141,27 @@ const generateSinglePromptWithDoubao = async (
       throw new Error(`Status ${response.status}`);
     }
 
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content;
+    const rawText = await response.text();
+    let content: string | undefined;
 
-    if (!content) throw new Error("Empty content");
+    try {
+      const data = JSON.parse(rawText);
+      content = data.choices?.[0]?.message?.content;
+    } catch {
+      // 接口有时返回截断的 JSON（Unterminated string），尝试从原文中抽取 content
+      const match = rawText.match(/"content"\s*:\s*"((?:[^"\\]|\\.)*)/);
+      if (match) {
+        content = match[1].replace(/\\(.)/g, "$1");
+      }
+    }
+
+    if (!content || content.length < 20) throw new Error("Empty or invalid content");
     return content.trim();
 
   } catch (error) {
-    console.warn(`Doubao Prompt (Idx ${index}) failed, using fallback.`);
-    // Return null to signal fallback needed
-    return "";
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(`Doubao Prompt (Idx ${index}) failed (${msg}), using fallback.`);
+    return ""; // 空字符串会触发 fallback
   }
 };
 
@@ -177,16 +188,20 @@ const generatePromptsParallel = async (
   const promises = Array.from({ length: count }).map(async (_, i) => {
     const v = variations[i % variations.length];
 
-    const apiResult = await generateSinglePromptWithDoubao(userInput, style, viewDistance, v.instruction, i);
-
-    if (apiResult && apiResult.length > 20) {
-      return apiResult;
+    try {
+      const apiResult = await generateSinglePromptWithDoubao(userInput, style, viewDistance, v.instruction, i);
+      if (apiResult && apiResult.length > 20) {
+        return apiResult;
+      }
+    } catch (err) {
+      console.warn(`Prompt ${i} API call error:`, err);
     }
 
+    // API 失败或返回空，用本地 fallback
     return generateFallbackPrompt(userInput, style, viewDistance, v.suffix);
   });
 
-  // Wait for all (since we handle errors inside map, Promise.all won't reject)
+  // 所有 Promise 都有 fallback，不会 reject
   return Promise.all(promises);
 };
 
@@ -202,16 +217,75 @@ export const generateCreativePrompts = async (
   return await generatePromptsParallel(userInput, style, count, viewDistance);
 };
 
+let lastImageGenDebugSnippet = "";
+/** 图片生成失败时最近一次接口响应/错误片段，便于复制排查 */
+export function getLastImageGenDebugInfo(): string {
+  return lastImageGenDebugSnippet;
+}
+
+/** Volces/TOS 签名图 URL 是否完整（截断的 URL 会导致图片加载失败，如末尾 x-tos-process=image_YX） */
+function isVolcesImageUrlComplete(url: string): boolean {
+  if (!url || !url.startsWith("http")) {
+    console.warn(`[URL Check] Invalid URL format: ${url?.slice(0, 50)}`);
+    return false;
+  }
+  
+  // 非 Volces/TOS URL 直接通过
+  if (!/volces\.com|tos-cn-beijing/i.test(url)) {
+    console.log(`[URL Check] Non-Volces URL, accepted: ${url.slice(0, 80)}`);
+    return true;
+  }
+  
+  // 必须有完整签名：X-Tos-Signature=<64位十六进制>
+  const signatureMatch = url.match(/X-Tos-Signature=([0-9a-f]+)/i);
+  if (!signatureMatch) {
+    console.warn(`[URL Check] Missing X-Tos-Signature in Volces URL`);
+    return false;
+  }
+  if (signatureMatch[1].length !== 64) {
+    console.warn(`[URL Check] Incomplete signature: ${signatureMatch[1].length}/64 chars`);
+    return false;
+  }
+  
+  // 检查 URL 是否突然截断（不以正常字符结尾）
+  const lastChar = url.slice(-1);
+  const validEndings = /[a-zA-Z0-9=\-_]/;
+  if (!validEndings.test(lastChar)) {
+    console.warn(`[URL Check] URL ends with suspicious char: '${lastChar}'`);
+    return false;
+  }
+  
+  // 若含 x-tos-process=，末尾参数值需足够长（完整为 image/watermark,image_<base64>，截断常为 image_YX）
+  const processMatch = url.match(/x-tos-process=([^&]*)$/i);
+  if (processMatch) {
+    try {
+      const value = decodeURIComponent(processMatch[1] || "");
+      if (value.length < 40) {
+        console.warn(`[URL Check] x-tos-process value too short: ${value.length} chars (${value.slice(0, 30)})`);
+        return false;
+      }
+    } catch (e) {
+      console.warn(`[URL Check] Failed to decode x-tos-process: ${processMatch[1]?.slice(0, 30)}`);
+      return false;
+    }
+  }
+  
+  console.log(`[URL Check] ✓ Complete Volces URL validated (${url.length} chars)`);
+  return true;
+}
+
 /**
  * 图片生成：豆包 Seedream（OpenAI 兼容接口）
  * base_url: https://ark.cn-beijing.volces.com/api/v3
  * 官方案例：client.images.generate(model="doubao-seedream-4-5-251128", prompt=..., size="2K", response_format="url", extra_body={"watermark": True})
  */
 export const generateImageFromPrompt = async (prompt: string, aspectRatio: string = "1:1"): Promise<string> => {
+  lastImageGenDebugSnippet = "";
   const originalEndpoint = "https://ark.cn-beijing.volces.com/api/v3/images/generations";
 
   const apiKey = getDoubaoApiKey();
   if (!apiKey) {
+    lastImageGenDebugSnippet = "未配置 VITE_DOUBAO_API_KEY";
     throw new Error(
       "未配置图像生成 Key。请在 .env 中设置 VITE_DOUBAO_API_KEY（火山方舟控制台获取，需开通 Seedream 图像生成），保存后重启 dev。"
     );
@@ -248,58 +322,149 @@ export const generateImageFromPrompt = async (prompt: string, aspectRatio: strin
   };
 
   let lastErr: string = "";
+  let isAuthError = false;
+  
   for (let attempt = 0; attempt < 3; attempt++) {
     const endpoints = [getProxyUrl(originalEndpoint)];
     const fallback = getFallbackCorsProxy();
     if (fallback) endpoints.push(fallback + encodeURIComponent(originalEndpoint));
+    
+    if (attempt > 0) {
+      // 指数退避：第1次重试等3秒，第2次重试等6秒
+      const delay = 3000 * attempt;
+      console.log(`[Image Gen] Retry ${attempt}/3 after ${delay}ms...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+    
     for (const endpoint of endpoints) {
       try {
+        console.log(`[Image Gen] Attempt ${attempt + 1}/3, endpoint: ${endpoint.slice(0, 60)}...`);
         const response = await tryFetch(endpoint);
-        const responseText = await response.text();
+        
+        // Use arrayBuffer + TextDecoder for more reliable reading
+        const buffer = await response.arrayBuffer();
+        const responseText = new TextDecoder('utf-8').decode(buffer);
+        
+        console.log(`[Image Gen] Response: ${response.status}, length: ${responseText.length} chars (${buffer.byteLength} bytes)`);
+        
         if (!response.ok) {
           lastErr = `HTTP ${response.status}: ${responseText.slice(0, 300)}`;
+          lastImageGenDebugSnippet = `[Image ${response.status}]\n${responseText.slice(0, 800)}`;
+          
+          // 检查是否是认证错误（不值得重试）
+          if (response.status === 401 || response.status === 403) {
+            isAuthError = true;
+            throw new Error(lastErr);
+          }
+          
+          // 检查是否是配额/限流错误
+          if (response.status === 429 || responseText.includes("quota") || responseText.includes("rate limit")) {
+            lastErr += " (API 配额不足或限流)";
+            throw new Error(lastErr);
+          }
+          
           throw new Error(lastErr);
         }
         let data: { data?: Array<{ url?: string }>; error?: { message?: string } } | null = null;
         try {
           data = JSON.parse(responseText);
-        } catch {
+        } catch (parseErr) {
           // 响应可能被截断或含特殊字符，尝试从正文中提取 data[0].url
-          let extractedUrl = responseText.match(/"url"\s*:\s*"(https?:\/\/[^"]+)"/)?.[1];
+          console.warn(`JSON parse failed (${responseText.length} chars), attempting URL extraction:`, parseErr);
+          
+          // 尝试多种方式提取 URL
+          let extractedUrl: string | undefined;
+          
+          // 方法1: 正则匹配 "url": "https://..."
+          const match1 = responseText.match(/"url"\s*:\s*"(https?:\/\/[^"\\]+(?:\\.[^"\\]*)*)"/);
+          if (match1) {
+            extractedUrl = match1[1].replace(/\\(.)/g, "$1"); // 处理转义字符
+          }
+          
+          // 方法2: 查找 Volces/TOS URL（包含签名）
+          if (!extractedUrl) {
+            const volcesMatch = responseText.match(/(https?:\/\/[^"\s]+?(?:volces\.com|tos-cn-beijing)[^"\s]*X-Tos-Signature=[0-9a-f]{64}[^"\s]*)/i);
+            if (volcesMatch) {
+              extractedUrl = volcesMatch[1].split('"')[0].split('\\')[0];
+            }
+          }
+          
+          // 方法3: 通用 HTTPS URL 提取
           if (!extractedUrl && responseText.includes("https://")) {
             const urlStart = responseText.indexOf("https://");
             const after = responseText.slice(urlStart);
-            const end = after.indexOf('"');
+            const end = after.search(/["'\s\\]/);
             extractedUrl = end !== -1 ? after.slice(0, end) : after.trim();
           }
-          // 仅当提取的 URL 看起来完整时才使用（避免截断导致图片无法加载）
-          const looksComplete = extractedUrl && extractedUrl.startsWith("http") && extractedUrl.length >= 80 && !/[{\\[,\s]$/.test(extractedUrl.trim());
-          if (looksComplete) {
+          
+          console.log(`Extracted URL candidate: ${extractedUrl?.slice(0, 100)}...`);
+          
+          if (extractedUrl && isVolcesImageUrlComplete(extractedUrl)) {
+            console.log(`✓ Successfully extracted complete URL from truncated JSON`);
             return extractedUrl;
           }
-          lastErr = "响应非 JSON: " + responseText.slice(0, 200);
+          
+          lastErr = `接口返回了被截断的 JSON（收到 ${responseText.length} 字符）。${extractedUrl ? '提取到的 URL 不完整。' : '未能提取到有效 URL。'}可能原因：网络不稳定、代理服务问题、或火山引擎 API 响应异常。`;
+          lastImageGenDebugSnippet = `响应长度: ${responseText.length} 字符\n提取的URL: ${extractedUrl?.slice(0, 200) || '无'}\n\n响应前 800 字符:\n${responseText.slice(0, 800)}\n\n响应后 200 字符:\n${responseText.slice(-200)}`;
           throw new Error(lastErr);
         }
         if (data?.data?.[0]?.url) {
           const originalUrl = data.data[0].url;
-          // 通过同源代理加载图片，避免浏览器直连 Volces 签名链接时的 CORS/403
-          return getProxyUrl(originalUrl);
+          if (!isVolcesImageUrlComplete(originalUrl)) {
+            lastErr = "接口返回的图片 URL 不完整（可能被截断）";
+            lastImageGenDebugSnippet = originalUrl?.slice(0, 500) ?? "";
+            throw new Error(lastErr);
+          }
+          // 直接返回 Volces 签名链接，避免 /api/proxy 被广告拦截器拦截（ERR_BLOCKED_BY_CLIENT）
+          return originalUrl;
         }
         const apiMsg = data?.error?.message ?? (data as any)?.message ?? "";
         lastErr = apiMsg ? `接口返回无图片: ${apiMsg}` : "接口返回无 data[0].url";
+        lastImageGenDebugSnippet = responseText.slice(0, 800);
         throw new Error(lastErr);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (!lastErr) lastErr = msg;
-        console.warn("Image gen attempt failed:", endpoint.slice(0, 50), msg);
+        console.warn(`[Image Gen] Attempt failed on ${endpoint.slice(0, 50)}:`, msg);
+        
+        // 如果是认证错误，不要继续尝试其他 endpoint
+        if (isAuthError) break;
         continue;
       }
     }
-    if (attempt < 2) await new Promise(r => setTimeout(r, 3000));
+    
+    // 如果是认证错误，不要重试
+    if (isAuthError) break;
   }
-  const hint =
-    "请检查：1) 本页与开发服务同源（如 localhost:3000），/api/proxy 可用；2) 火山引擎控制台该 Key 已开通「图像生成」/ Seedream 模型；3) 境内访问境外站点时需代理或部署到境内。";
-  throw new Error(`图片生成失败。${hint}${lastErr ? "\n\n最后错误: " + lastErr : ""}`);
+  
+  // 构建详细的错误提示
+  let hint = "请检查：\n";
+  if (isAuthError) {
+    hint += "❌ API Key 无效或未授权。请确认：\n";
+    hint += "1) .env 中的 VITE_DOUBAO_API_KEY 正确（从火山引擎控制台获取）\n";
+    hint += "2) 该 Key 已在火山引擎控制台开通「图像生成」/ Seedream 模型权限\n";
+    hint += "3) Key 未过期且有足够配额";
+  } else if (lastErr.includes("配额") || lastErr.includes("quota") || lastErr.includes("rate limit")) {
+    hint += "⚠️ API 配额不足或触发限流。请检查：\n";
+    hint += "1) 火山引擎控制台余额是否充足\n";
+    hint += "2) 是否触发了每日/每分钟调用限制\n";
+    hint += "3) 稍后再试";
+  } else if (lastErr.includes("截断")) {
+    hint += "⚠️ 响应数据被截断（可能原因）：\n";
+    hint += "1) 网络不稳定导致传输中断（请检查网络连接）\n";
+    hint += "2) 代理服务器配置问题（如使用 corsproxy.io 可能不稳定）\n";
+    hint += "3) 本地开发服务器超时（重启 npm run dev）\n";
+    hint += "4) 火山引擎 API 响应异常（稍后重试）\n";
+    hint += "\n💡 建议：使用 npm start 自建代理服务器，或部署到 Vercel";
+  } else {
+    hint += "1) 本页与开发服务同源（如 localhost:3000），/api/proxy 可用\n";
+    hint += "2) 火山引擎控制台该 Key 已开通「图像生成」/ Seedream 模型\n";
+    hint += "3) 境内访问境外站点时需代理或部署到境内\n";
+    hint += "4) 检查控制台（F12）是否有网络错误";
+  }
+  
+  lastImageGenDebugSnippet = lastErr ? `最后错误: ${lastErr}\n\n调试信息:\n${lastImageGenDebugSnippet}` : "";
+  throw new Error(`图片生成失败。\n\n${hint}${lastErr ? "\n\n最后错误: " + lastErr : ""}`);
 };
 
 export { generateSpeechDoubao } from './doubaoTtsService';
