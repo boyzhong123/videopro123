@@ -12,15 +12,23 @@ const getAiClient = () => {
 // SHARED API KEY for Doubao services
 const DOUBAO_API_KEY = "34869c98-5ed6-4091-97bc-669de7b38ef1";
 
-/** 优先同源 /api/proxy，否则用 VITE_CORS_PROXY 或 corsproxy.io */
-function getProxyUrl(target: string): string {
-  if (typeof window !== "undefined" && window.location?.origin)
-    return `${window.location.origin}/api/proxy?url=${encodeURIComponent(target)}`;
-  const prefix = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_CORS_PROXY) || "https://corsproxy.io/?";
-  return prefix + encodeURIComponent(target);
+const USE_CORS_PROXY =
+  typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_USE_CORS_PROXY === "true";
+const CORS_PROXY_PREFIX =
+  (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_CORS_PROXY) || "https://corsproxy.io/?";
+
+function getFallbackCorsProxy(): string | null {
+  return USE_CORS_PROXY ? CORS_PROXY_PREFIX : null;
 }
 
-const FALLBACK_CORS_PROXY = "https://corsproxy.io/?";
+/** 优先同源 /api/proxy；可选启用 CORS 代理（VITE_USE_CORS_PROXY=true） */
+function getProxyUrl(target: string): string {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    return `${window.location.origin}/api/proxy?url=${encodeURIComponent(target)}`;
+  }
+  const fallback = getFallbackCorsProxy();
+  return fallback ? fallback + encodeURIComponent(target) : target;
+}
 
 /**
  * Helper: Generate a fallback prompt locally if API fails.
@@ -225,7 +233,10 @@ export const generateImageFromPrompt = async (prompt: string, aspectRatio: strin
   };
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    for (const endpoint of [getProxyUrl(originalEndpoint), FALLBACK_CORS_PROXY + encodeURIComponent(originalEndpoint)]) {
+    const endpoints = [getProxyUrl(originalEndpoint)];
+    const fallback = getFallbackCorsProxy();
+    if (fallback) endpoints.push(fallback + encodeURIComponent(originalEndpoint));
+    for (const endpoint of endpoints) {
       try {
         const response = await tryFetch(endpoint);
         if (!response.ok) {
@@ -245,7 +256,7 @@ export const generateImageFromPrompt = async (prompt: string, aspectRatio: strin
     }
     if (attempt < 2) await new Promise(r => setTimeout(r, 3000));
   }
-  throw new Error("图片生成失败，请检查网络或稍后重试");
+  throw new Error("图片生成失败。若站点在境外，境内访问时请尝试开启网络代理后重试；或部署到境内服务器可无需代理。");
 };
 
 export { generateSpeechDoubao } from './doubaoTtsService';

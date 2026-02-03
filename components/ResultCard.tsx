@@ -45,6 +45,9 @@ const ResultCard: React.FC<ResultCardProps> = ({ item, aspectRatio, onRetry }) =
             ) : item.error ? (
               <div className="flex flex-col items-center justify-center gap-4 p-6 text-center w-full h-full bg-[#1a0f0f]">
                 <p className="text-red-900/80 font-serif italic text-sm">Creation Failed</p>
+                {item.error && item.error !== "Image generation failed" && (
+                  <p className="text-slate-500 text-[10px] max-w-[90%] leading-relaxed">{item.error}</p>
+                )}
                 <button 
                   onClick={() => onRetry(item.id)}
                   className="px-5 py-2.5 text-xs bg-red-900/20 border border-red-900/50 text-red-400 hover:bg-red-900/40 hover:text-white transition-all uppercase tracking-widest shadow-[0_0_15px_rgba(255,0,0,0.1)] hover:shadow-[0_0_20px_rgba(255,0,0,0.2)]"

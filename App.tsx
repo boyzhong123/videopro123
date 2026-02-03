@@ -79,10 +79,11 @@ const App: React.FC = () => {
       );
     } catch (error) {
       console.error(`Failed to generate image for id ${id}`, error);
+      const message = error instanceof Error ? error.message : "Image generation failed";
       setItems(currentItems => 
         currentItems.map(item => 
           item.id === id 
-            ? { ...item, loading: false, error: "Image generation failed" }
+            ? { ...item, loading: false, error: message }
             : item
         )
       );

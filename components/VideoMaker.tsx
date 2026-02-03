@@ -26,12 +26,21 @@ const BGM_TRACKS: { id: string; label: string; url: string }[] = [
   { id: 'mixkit-classical-10-717', label: '古典钢琴叙事', url: 'https://assets.mixkit.co/music/preview/mixkit-classical-10-717.mp3' },
 ];
 
-/** 优先同源 /api/proxy，不依赖第三方代理 */
+const USE_CORS_PROXY =
+  typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_USE_CORS_PROXY === 'true';
+const CORS_PROXY_PREFIX =
+  (import.meta as any).env?.VITE_CORS_PROXY || 'https://corsproxy.io/?';
+
+function getFallbackCorsProxy(): string | null {
+  return USE_CORS_PROXY ? CORS_PROXY_PREFIX : null;
+}
+
+/** 优先同源 /api/proxy；可选启用 CORS 代理 */
 function getProxyUrl(target: string): string {
   if (typeof window !== 'undefined' && window.location?.origin)
     return `${window.location.origin}/api/proxy?url=${encodeURIComponent(target)}`;
-  const prefix = (import.meta as any).env?.VITE_CORS_PROXY || 'https://corsproxy.io/?';
-  return prefix + encodeURIComponent(target);
+  const fallback = getFallbackCorsProxy();
+  return fallback ? fallback + encodeURIComponent(target) : target;
 }
 
 /** 获取 BGM 候选 URL：仅本地 /bgm/{id}.mp3（远程已改为国内可访问源，见 README） */

@@ -5,16 +5,21 @@
 
 const TTS_ENDPOINT = "https://openspeech.bytedance.com/api/v3/tts/unidirectional";
 
-/** 同源代理 URL（开发/生产用） */
+const USE_CORS_PROXY =
+  typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_USE_CORS_PROXY === "true";
+const CORS_PROXY_PREFIX =
+  (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_CORS_PROXY) || "https://corsproxy.io/?";
+
+function getFallbackCorsProxy(): string | null {
+  return USE_CORS_PROXY ? CORS_PROXY_PREFIX : null;
+}
+
+/** 同源代理 URL（开发/生产用）；可选启用 CORS 代理 */
 function getProxyUrl(target: string): string {
   if (typeof window !== "undefined" && window.location?.origin)
     return `${window.location.origin}/api/proxy?url=${encodeURIComponent(target)}`;
-  return getFallbackCorsProxy() + encodeURIComponent(target);
-}
-
-/** 同源代理失败时回退：VITE_CORS_PROXY 或 corsproxy.io */
-function getFallbackCorsProxy(): string {
-  return (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_CORS_PROXY) || "https://corsproxy.io/?";
+  const fallback = getFallbackCorsProxy();
+  return fallback ? fallback + encodeURIComponent(target) : target;
 }
 
 function isNetworkError(e: unknown): boolean {
