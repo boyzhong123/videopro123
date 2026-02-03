@@ -161,7 +161,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onGenerate, isLoading }) => {
                </label>
                <input 
                  type="range" 
-                 min="4" 
+                 min="2" 
                  max="10" 
                  step="1"
                  value={imageCount}
@@ -170,8 +170,8 @@ const InputArea: React.FC<InputAreaProps> = ({ onGenerate, isLoading }) => {
                  className="w-full h-1 bg-[#333] rounded-lg appearance-none cursor-pointer accent-[#d4af37]"
                />
                <div className="flex justify-between text-[10px] text-slate-600 font-mono">
-                 <span>4</span>
-                 <span>7</span>
+                 <span>2</span>
+                 <span>6</span>
                  <span>10</span>
                </div>
             </div>

@@ -5,9 +5,10 @@ interface ResultCardProps {
   item: GeneratedItem;
   aspectRatio: string;
   onRetry: (id: string) => void;
+  onImageError?: (id: string) => void;
 }
 
-const ResultCard: React.FC<ResultCardProps> = ({ item, aspectRatio, onRetry }) => {
+const ResultCard: React.FC<ResultCardProps> = ({ item, aspectRatio, onRetry, onImageError }) => {
   // Use CSS aspectRatio property (e.g., "16/9")
   const ratioStyle = aspectRatio.replace(':', '/');
 
@@ -26,6 +27,7 @@ const ResultCard: React.FC<ResultCardProps> = ({ item, aspectRatio, onRetry }) =
                   src={item.imageUrl} 
                   alt="Generated result" 
                   className="w-full h-full object-cover animate-fade-in transition-transform duration-1000 ease-in-out group-hover:scale-[1.02]"
+                  onError={() => onImageError?.(item.id)}
                 />
                 {/* Overlay on hover for Regenerate */}
                 <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center justify-center">

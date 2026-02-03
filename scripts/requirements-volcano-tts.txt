@@ -1,0 +1,2 @@
+# 火山方洲 TTS 脚本依赖（仅 requests；hmac/hashlib/datetime/urllib3 为标准库）
+requests>=2.28.0

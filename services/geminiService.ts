@@ -9,25 +9,34 @@ const getAiClient = () => {
   return new GoogleGenAI({ apiKey: apiKey });
 };
 
-// SHARED API KEY for Doubao services
-const DOUBAO_API_KEY = "34869c98-5ed6-4091-97bc-669de7b38ef1";
+/** 豆包/火山 API Key（图像生成、对话），Vite 需在 .env 配置 VITE_DOUBAO_API_KEY */
+function getDoubaoApiKey(): string {
+  const env = typeof import.meta !== "undefined" ? (import.meta as any).env : {};
+  return (env.VITE_DOUBAO_API_KEY || "").trim();
+}
 
 const USE_CORS_PROXY =
   typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_USE_CORS_PROXY === "true";
 const CORS_PROXY_PREFIX =
   (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_CORS_PROXY) || "https://corsproxy.io/?";
 
+// CRITICAL FIX: Explicitly check for string "null" which causes "nullhttps://..."
 function getFallbackCorsProxy(): string | null {
-  return USE_CORS_PROXY ? CORS_PROXY_PREFIX : null;
+  const proxy = USE_CORS_PROXY ? CORS_PROXY_PREFIX : null;
+  if (!proxy || proxy === "null" || proxy === "undefined" || proxy === "false") {
+    return null;
+  }
+  return proxy;
 }
 
-/** 优先同源 /api/proxy；可选启用 CORS 代理（VITE_USE_CORS_PROXY=true） */
-function getProxyUrl(target: string): string {
-  if (typeof window !== "undefined" && window.location?.origin) {
-    return `${window.location.origin}/api/proxy?url=${encodeURIComponent(target)}`;
-  }
+/** 优先同源 /api/proxy；origin 为 null/"null" 时用相对路径，避免拼出 nullhttps://... */
+export function getProxyUrl(target: string): string {
+  const origin = typeof window !== "undefined" ? window.location?.origin : "";
+  const base = origin && origin !== "null" ? origin : "";
+  if (base) return `${base}/api/proxy?url=${encodeURIComponent(target)}`;
   const fallback = getFallbackCorsProxy();
-  return fallback ? fallback + encodeURIComponent(target) : target;
+  if (fallback && fallback !== "null" && fallback !== "undefined") return fallback + encodeURIComponent(target);
+  return `/api/proxy?url=${encodeURIComponent(target)}`;
 }
 
 /**
@@ -111,7 +120,7 @@ const generateSinglePromptWithDoubao = async (
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${DOUBAO_API_KEY}`,
+        "Authorization": `Bearer ${getDoubaoApiKey()}`,
       },
       body: JSON.stringify({
         model: modelId,
@@ -134,14 +143,14 @@ const generateSinglePromptWithDoubao = async (
 
     const data = await response.json();
     const content = data.choices?.[0]?.message?.content;
-    
+
     if (!content) throw new Error("Empty content");
     return content.trim();
 
   } catch (error) {
     console.warn(`Doubao Prompt (Idx ${index}) failed, using fallback.`);
     // Return null to signal fallback needed
-    return ""; 
+    return "";
   }
 };
 
@@ -150,12 +159,12 @@ const generateSinglePromptWithDoubao = async (
  * ROBUST STRATEGY: Try API -> If 504/Fail -> Use Local Fallback instantly.
  */
 const generatePromptsParallel = async (
-  userInput: string, 
-  style: string, 
+  userInput: string,
+  style: string,
   count: number,
   viewDistance: string
 ): Promise<string[]> => {
-  
+
   const variations = [
     { instruction: "Focus on dramatic lighting, atmosphere, and mood. Keep the same time period/era as the user's scene (no mixing primitive and modern).", suffix: "dramatic cinematic lighting, atmospheric, volumetric fog, moody, same era" },
     { instruction: "Focus on intricate textures, material details. Maintain era consistency: buildings and people must belong to one coherent time period.", suffix: "intricate details, highly textured, 8k resolution, coherent era, no anachronism" },
@@ -167,13 +176,13 @@ const generatePromptsParallel = async (
 
   const promises = Array.from({ length: count }).map(async (_, i) => {
     const v = variations[i % variations.length];
-    
+
     const apiResult = await generateSinglePromptWithDoubao(userInput, style, viewDistance, v.instruction, i);
-    
+
     if (apiResult && apiResult.length > 20) {
       return apiResult;
     }
-    
+
     return generateFallbackPrompt(userInput, style, viewDistance, v.suffix);
   });
 
@@ -185,8 +194,8 @@ const generatePromptsParallel = async (
  * Generates detailed image prompts.
  */
 export const generateCreativePrompts = async (
-  userInput: string, 
-  style: string, 
+  userInput: string,
+  style: string,
   count: number = 4,
   viewDistance: string = 'Default'
 ): Promise<string[]> => {
@@ -194,34 +203,40 @@ export const generateCreativePrompts = async (
 };
 
 /**
- * Generates an image using Doubao (Volcengine).
+ * 图片生成：豆包 Seedream（OpenAI 兼容接口）
+ * base_url: https://ark.cn-beijing.volces.com/api/v3
+ * 官方案例：client.images.generate(model="doubao-seedream-4-5-251128", prompt=..., size="2K", response_format="url", extra_body={"watermark": True})
  */
 export const generateImageFromPrompt = async (prompt: string, aspectRatio: string = "1:1"): Promise<string> => {
   const originalEndpoint = "https://ark.cn-beijing.volces.com/api/v3/images/generations";
 
-  let width = 1024;
-  let height = 1024;
-  switch (aspectRatio) {
-    case '16:9': width = 1536; height = 864; break;
-    case '4:3': width = 1280; height = 960; break;
-    case '3:4': width = 960; height = 1280; break;
-    case '9:16': width = 864; height = 1536; break;
-    case '1:1': default: width = 1280; height = 1280; break;
+  const apiKey = getDoubaoApiKey();
+  if (!apiKey) {
+    throw new Error(
+      "未配置图像生成 Key。请在 .env 中设置 VITE_DOUBAO_API_KEY（火山方舟控制台获取，需开通 Seedream 图像生成），保存后重启 dev。"
+    );
   }
+
+  // 与官方 OpenAI 兼容接口一致：size "2K"，response_format "url"，watermark 可选
+  const sizeMap: Record<string, string> = {
+    "1:1": "2K",
+    "16:9": "2K",
+    "4:3": "2K",
+    "3:4": "2K",
+    "9:16": "2K",
+  };
+  const size = sizeMap[aspectRatio] ?? "2K";
 
   const body = JSON.stringify({
     model: "doubao-seedream-4-5-251128",
     prompt: `${prompt.trim()} No text, no words, no letters, no writing, no captions in the image.`,
-    width,
-    height,
+    size,
     response_format: "url",
-    sequential_image_generation: "disabled",
-    stream: false,
-    watermark: false
+    watermark: true,
   });
   const headers = {
     "Content-Type": "application/json",
-    "Authorization": `Bearer ${DOUBAO_API_KEY}`,
+    "Authorization": `Bearer ${apiKey}`,
   };
 
   const tryFetch = async (endpoint: string): Promise<Response> => {
@@ -232,6 +247,7 @@ export const generateImageFromPrompt = async (prompt: string, aspectRatio: strin
     return response;
   };
 
+  let lastErr: string = "";
   for (let attempt = 0; attempt < 3; attempt++) {
     const endpoints = [getProxyUrl(originalEndpoint)];
     const fallback = getFallbackCorsProxy();
@@ -239,24 +255,51 @@ export const generateImageFromPrompt = async (prompt: string, aspectRatio: strin
     for (const endpoint of endpoints) {
       try {
         const response = await tryFetch(endpoint);
+        const responseText = await response.text();
         if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`Doubao API: ${response.status} - ${errorText.slice(0, 200)}`);
+          lastErr = `HTTP ${response.status}: ${responseText.slice(0, 300)}`;
+          throw new Error(lastErr);
         }
-        const data = await response.json();
-        if (data.data?.[0]?.url) {
+        let data: { data?: Array<{ url?: string }>; error?: { message?: string } } | null = null;
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          // 响应可能被截断或含特殊字符，尝试从正文中提取 data[0].url
+          let extractedUrl = responseText.match(/"url"\s*:\s*"(https?:\/\/[^"]+)"/)?.[1];
+          if (!extractedUrl && responseText.includes("https://")) {
+            const urlStart = responseText.indexOf("https://");
+            const after = responseText.slice(urlStart);
+            const end = after.indexOf('"');
+            extractedUrl = end !== -1 ? after.slice(0, end) : after.trim();
+          }
+          // 仅当提取的 URL 看起来完整时才使用（避免截断导致图片无法加载）
+          const looksComplete = extractedUrl && extractedUrl.startsWith("http") && extractedUrl.length >= 80 && !/[{\\[,\s]$/.test(extractedUrl.trim());
+          if (looksComplete) {
+            return extractedUrl;
+          }
+          lastErr = "响应非 JSON: " + responseText.slice(0, 200);
+          throw new Error(lastErr);
+        }
+        if (data?.data?.[0]?.url) {
           const originalUrl = data.data[0].url;
-          return `https://wsrv.nl/?url=${encodeURIComponent(originalUrl)}&output=png`;
+          // 通过同源代理加载图片，避免浏览器直连 Volces 签名链接时的 CORS/403
+          return getProxyUrl(originalUrl);
         }
-        throw new Error("No valid image URL returned");
+        const apiMsg = data?.error?.message ?? (data as any)?.message ?? "";
+        lastErr = apiMsg ? `接口返回无图片: ${apiMsg}` : "接口返回无 data[0].url";
+        throw new Error(lastErr);
       } catch (err) {
-        console.warn("Image gen proxy attempt failed:", endpoint.slice(0, 50), err);
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!lastErr) lastErr = msg;
+        console.warn("Image gen attempt failed:", endpoint.slice(0, 50), msg);
         continue;
       }
     }
     if (attempt < 2) await new Promise(r => setTimeout(r, 3000));
   }
-  throw new Error("图片生成失败。若站点在境外，境内访问时请尝试开启网络代理后重试；或部署到境内服务器可无需代理。");
+  const hint =
+    "请检查：1) 本页与开发服务同源（如 localhost:3000），/api/proxy 可用；2) 火山引擎控制台该 Key 已开通「图像生成」/ Seedream 模型；3) 境内访问境外站点时需代理或部署到境内。";
+  throw new Error(`图片生成失败。${hint}${lastErr ? "\n\n最后错误: " + lastErr : ""}`);
 };
 
 export { generateSpeechDoubao } from './doubaoTtsService';
