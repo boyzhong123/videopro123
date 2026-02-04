@@ -75,11 +75,13 @@ const generateFallbackPrompt = (
   return `(Masterpiece, top quality) ${viewDesc} of ${subject}. ${eraNote} ${variation}. ${extraStyle}, dramatic lighting, trending on ArtStation, vivid details, sharp focus. ${noText}`;
 };
 
+export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
+
 /**
  * 将用户的一段话切分为 N 个场景描述，用于视频分镜（每句/每段对应一张图）。
  * 优先调用豆包 API；失败时用本地按句切分。
  */
-const splitParagraphIntoScenes = async (paragraph: string, count: number): Promise<string[]> => {
+const splitParagraphIntoScenes = async (paragraph: string, count: number, reasoningEffort: ReasoningEffort = 'minimal'): Promise<string[]> => {
   const trimmed = paragraph.trim();
   if (count <= 0) return [];
   if (count === 1) return [trimmed];
@@ -95,7 +97,7 @@ Output format: exactly ${count} lines. One scene per line. No numbering, no bull
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
     const response = await fetch(endpoint, {
       method: "POST",
       headers: {
@@ -111,6 +113,7 @@ Output format: exactly ${count} lines. One scene per line. No numbering, no bull
         stream: false,
         temperature: 0.3,
         max_tokens: 800,
+        reasoning_effort: reasoningEffort,
       }),
       signal: controller.signal,
     });
@@ -164,7 +167,8 @@ const generateSinglePromptWithDoubao = async (
   viewDistance: string,
   sceneFocus: string,
   index: number,
-  totalCount: number
+  totalCount: number,
+  reasoningEffort: ReasoningEffort = 'minimal'
 ): Promise<string> => {
   const modelId = "doubao-seed-1-8-251228";
   const originalEndpoint = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
@@ -186,20 +190,19 @@ const generateSinglePromptWithDoubao = async (
     Camera Distance: "${viewDistance}"
     
     Requirements:
-    1. Start with the main subject and action.
-    2. Describe the environment and background in detail.
-    3. Strictly enforce the "${style}" aesthetic (e.g., lighting, color palette, texture).
-    4. Enforce the "${viewDistance}" composition (e.g., if Wide Shot, describe the vastness; if Close-up, describe details).
-    5. Add quality boosters: "8k", "cinematic lighting", "masterpiece".
+    1. BE FAITHFUL to the source: describe exactly what the text says, no unrelated additions.
+    2. Start with the main subject and action, then environment and background.
+    3. Strictly enforce the "${style}" aesthetic and "${viewDistance}" composition.
+    4. Add quality boosters: "8k", "cinematic lighting", "masterpiece".
     6. ERA & TIME PERIOD CONSISTENCY (critical for video): If the scene involves buildings, architecture, or people, choose ONE time period/era and describe ONLY that era. No anachronism. Keep clothing, architecture, and props all from the same era.
-    7. Decide whether to include people/characters based on the content: if the user's input is about nature, landscape, or knowledge (e.g. geography, science), describe only scenery/environment; if it involves story or characters, include them.
+    7. NON-NARRATIVE = NO PEOPLE: If the text is informational, explanatory, or non-story (science, geography, nature, concepts), describe ONLY scenery/environment/objects—no people. Only include people when the text is narrative with characters or historical figures.
     8. CRITICAL: The image must contain NO text, no words, no letters, no writing, no captions, no subtitles, no signage with readable text. Describe only visual elements; never suggest any text or writing in the scene.
     9. Output ONLY the English prompt. No explanations. The prompt should be around 50-80 words.
   `;
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 40000); // Increased timeout slightly for longer generation
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
 
     const response = await fetch(endpoint, {
       method: "POST",
@@ -214,8 +217,9 @@ const generateSinglePromptWithDoubao = async (
           { role: "user", content: "Generate cinematic prompt." }
         ],
         stream: false,
-        temperature: 0.7,
-        max_tokens: 400 // Increased limit for detailed video prompts
+        temperature: 0.45,
+        max_tokens: 400,
+        reasoning_effort: reasoningEffort,
       }),
       signal: controller.signal
     });
@@ -250,17 +254,118 @@ const generateSinglePromptWithDoubao = async (
   }
 };
 
+/** 本地按句切分，用于 sceneText 展示（无需 API） */
+const localSplitScenes = (paragraph: string, count: number): string[] => {
+  const trimmed = paragraph.trim();
+  if (count <= 0) return [];
+  if (count === 1) return [trimmed];
+  const sentences = trimmed
+    .split(/[。！？.!?\n]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (sentences.length === 0) return Array(count).fill(trimmed);
+  const result: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const idx = Math.floor((i * sentences.length) / count);
+    result.push(sentences[Math.min(idx, sentences.length - 1)] || trimmed);
+  }
+  return result;
+};
+
 /**
- * Generates multiple prompts: 一段话按句/按场景切分为 N 段，每段对应一张图（视频分镜）。
- * 1. 先将整段话切分为 N 个场景描述；2. 再为每个场景生成一张图的英文提示词。
+ * 一次 API 调用，直接返回 N 条图片 prompt。
+ * 输出格式：N 行，每行一条英文 prompt，减少 token 提升速度。
+ */
+const generatePromptsInOneCall = async (
+  userInput: string,
+  style: string,
+  count: number,
+  viewDistance: string,
+  reasoningEffort: ReasoningEffort = 'minimal'
+): Promise<{ prompt: string; sceneText: string }[]> => {
+  const modelId = "doubao-seed-1-8-251228";
+  const originalEndpoint = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
+  const endpoint = getProxyUrl(originalEndpoint + "?_t=" + Date.now());
+
+  const systemPrompt = `You are a Film Concept Artist. Output exactly ${count} English image prompts for a video, one per line.
+
+CRITICAL - COVER ALL EXAMPLES: If the text mentions multiple distinct people or examples (e.g., Lincoln AND Helen Keller), you MUST depict each in at least one keyframe. Do NOT omit any named person or major example. Distribute keyframes across the full narrative.
+
+CRITICAL - NON-NARRATIVE = NO PEOPLE: If the text is informational, explanatory, or non-story (e.g., science, geography, nature, concepts, how-things-work), describe ONLY scenery, environment, objects, or abstract visuals. Do NOT include any people, characters, or human figures.
+
+Rules: Faithful to the source. Style: "${style}". Camera: "${viewDistance}". Add "8k, cinematic lighting, masterpiece". No text in images. Same world/era where relevant. Each prompt 50-80 words.
+Output: exactly ${count} lines, one prompt per line, no numbering.`;
+
+  const userMessage = `Generate ${count} keyframe prompts for:\n\n${userInput.trim()}`;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${getDoubaoApiKey()}`,
+      },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userMessage },
+        ],
+        stream: false,
+        temperature: 0.45,
+        max_tokens: 1200,
+        reasoning_effort: reasoningEffort,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) throw new Error(`Status ${response.status}`);
+    const rawText = await response.text();
+    const data = JSON.parse(rawText);
+    const content = data.choices?.[0]?.message?.content;
+    if (!content || typeof content !== "string") throw new Error("Empty response");
+
+    const lines = content
+      .split(/\n+/)
+      .map((s: string) => s.replace(/^\s*[\d\.\-\*]+\s*/, "").trim())
+      .filter((s: string) => s.length > 20);
+
+    const sceneTexts = localSplitScenes(userInput, count);
+    const results: { prompt: string; sceneText: string }[] = [];
+    for (let i = 0; i < count; i++) {
+      const prompt = lines[i]?.trim() || "";
+      if (prompt.length > 20) {
+        results.push({ prompt, sceneText: sceneTexts[i] ?? "" });
+      }
+    }
+
+    if (results.length >= count) return results.slice(0, count);
+    if (results.length > 0) {
+      const last = results[results.length - 1];
+      while (results.length < count) results.push({ ...last });
+      return results.slice(0, count);
+    }
+  } catch (e) {
+    console.warn("generatePromptsInOneCall failed, fallback to parallel:", e);
+  }
+
+  return [];
+};
+
+/**
+ * 回退：按场景切分 + 并行生成 prompt（原逻辑），返回带 sceneText 的结果。
  */
 const generatePromptsParallel = async (
   userInput: string,
   style: string,
   count: number,
-  viewDistance: string
-): Promise<string[]> => {
-  const scenes = await splitParagraphIntoScenes(userInput, count);
+  viewDistance: string,
+  reasoningEffort: ReasoningEffort = 'minimal'
+): Promise<{ prompt: string; sceneText: string }[]> => {
+  const scenes = await splitParagraphIntoScenes(userInput, count, reasoningEffort);
   const fallbackSuffixes = [
     "dramatic cinematic lighting, same era",
     "intricate details, 8k resolution, coherent era",
@@ -272,32 +377,39 @@ const generatePromptsParallel = async (
 
   const promises = Array.from({ length: count }).map(async (_, i) => {
     const sceneFocus = scenes[i] ?? userInput;
+    let prompt: string;
 
     try {
-      const apiResult = await generateSinglePromptWithDoubao(userInput, style, viewDistance, sceneFocus, i, count);
+      const apiResult = await generateSinglePromptWithDoubao(userInput, style, viewDistance, sceneFocus, i, count, reasoningEffort);
       if (apiResult && apiResult.length > 20) {
-        return apiResult;
+        prompt = apiResult;
+      } else {
+        prompt = generateFallbackPrompt(userInput, style, viewDistance, fallbackSuffixes[i % fallbackSuffixes.length], sceneFocus);
       }
     } catch (err) {
       console.warn(`Prompt ${i} API call error:`, err);
+      prompt = generateFallbackPrompt(userInput, style, viewDistance, fallbackSuffixes[i % fallbackSuffixes.length], sceneFocus);
     }
 
-    return generateFallbackPrompt(userInput, style, viewDistance, fallbackSuffixes[i % fallbackSuffixes.length], sceneFocus);
+    return { prompt, sceneText: sceneFocus };
   });
 
   return Promise.all(promises);
 };
 
 /**
- * Generates detailed image prompts.
+ * Generates detailed image prompts. 优先一次调用（更快），失败时回退到并行。
  */
 export const generateCreativePrompts = async (
   userInput: string,
   style: string,
   count: number = 4,
-  viewDistance: string = 'Default'
-): Promise<string[]> => {
-  return await generatePromptsParallel(userInput, style, count, viewDistance);
+  viewDistance: string = 'Default',
+  reasoningEffort: ReasoningEffort = 'minimal'
+): Promise<{ prompt: string; sceneText: string }[]> => {
+  const oneCall = await generatePromptsInOneCall(userInput, style, count, viewDistance, reasoningEffort);
+  if (oneCall.length >= count) return oneCall;
+  return generatePromptsParallel(userInput, style, count, viewDistance, reasoningEffort);
 };
 
 let lastImageGenDebugSnippet = "";

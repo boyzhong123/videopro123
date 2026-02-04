@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import Header from './components/Header';
 import InputArea from './components/InputArea';
 import ResultCard from './components/ResultCard';
@@ -23,6 +23,10 @@ const App: React.FC = () => {
   const [currentView, setCurrentView] = useState('Default');
   const [proxyHealth, setProxyHealth] = useState<ProxyHealthStatus | null>(null);
   const [showProxyWarning, setShowProxyWarning] = useState(true);
+  const collectionRef = useRef<HTMLDivElement>(null);
+  const videoProductionRef = useRef<HTMLDivElement>(null);
+  const prevAllImagesReady = useRef(false);
+  const prevPromptJustDone = useRef(false);
 
   // Check proxy health on mount
   useEffect(() => {
@@ -40,7 +44,7 @@ const App: React.FC = () => {
     setLastInputText(prev => (prev.trim() ? prev : '这是一段测试文案，用于验证语音合成与视频合成。'));
   }, []);
 
-  const handleGenerate = useCallback(async (inputText: string, style: string, aspectRatio: string, count: number, viewDistance: string) => {
+  const handleGenerate = useCallback(async (inputText: string, style: string, aspectRatio: string, count: number, viewDistance: string, reasoningEffort: 'minimal' | 'low' | 'medium' | 'high') => {
     setIsProcessing(true);
     setItems([]); // Clear previous results
     setLastInputText(inputText);
@@ -49,22 +53,22 @@ const App: React.FC = () => {
     setCurrentView(viewDistance);
 
     try {
-      // Step 1: Generate Prompts text first using Gemini 3 Flash with user specified count and view distance
-      const prompts = await generateCreativePrompts(inputText, style, count, viewDistance);
+      // Step 1: 一次 API 生成 N 个 prompt（优先），失败则回退并行
+      const results = await generateCreativePrompts(inputText, style, count, viewDistance, reasoningEffort);
 
-      // Create initial item state with loading indicators
-      const newItems: GeneratedItem[] = prompts.map((prompt, index) => ({
+      const newItems: GeneratedItem[] = results.map((r, index) => ({
         id: (index + 1).toString(),
-        prompt: prompt,
+        prompt: r.prompt,
+        sceneText: r.sceneText,
         loading: true,
       }));
 
       setItems(newItems);
-      setIsProcessing(false); // Text gen done, images process in background
+      setIsProcessing(false);
 
-      // Step 2: Generate Images in parallel for each prompt（传入 index 用于不同 seed，降低多图相似度）
-      prompts.forEach((prompt, index) => {
-        triggerImageGeneration((index + 1).toString(), prompt, aspectRatio, index);
+      // Step 2: 并行生成图片
+      results.forEach((r, index) => {
+        triggerImageGeneration((index + 1).toString(), r.prompt, aspectRatio, index);
       });
 
     } catch (error) {
@@ -136,8 +140,30 @@ const App: React.FC = () => {
 
   const allImagesReady = items.length > 0 && items.every(item => !item.loading && item.imageUrl);
 
+  // 提示词生成完成 → 滚动到图片区（仅当从「生成中」刚完成时）
+  useEffect(() => {
+    if (items.length > 0 && !isProcessing && prevPromptJustDone.current) {
+      prevPromptJustDone.current = false;
+      setTimeout(() => {
+        collectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 150);
+    }
+    if (isProcessing) prevPromptJustDone.current = true;
+  }, [items.length, isProcessing]);
+
+  // 图片全部生成完成 → 滚动到视频区
+  useEffect(() => {
+    if (allImagesReady && !prevAllImagesReady.current) {
+      prevAllImagesReady.current = true;
+      setTimeout(() => {
+        videoProductionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 200);
+    }
+    if (!allImagesReady) prevAllImagesReady.current = false;
+  }, [allImagesReady]);
+
   return (
-    <div className="min-h-screen text-slate-200 selection:bg-[#d4af37] selection:text-black">
+    <div className="min-h-screen text-slate-300 selection:bg-[#d4af37] selection:text-black">
       <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-12">
         <Header />
 
@@ -178,12 +204,12 @@ const App: React.FC = () => {
         <InputArea onGenerate={handleGenerate} isLoading={isProcessing} />
 
         {items.length > 0 && (
-          <div className="mt-24 animate-fade-in-up">
+          <div ref={collectionRef} className="mt-24 animate-fade-in-up">
             <div className="flex items-center justify-between mb-10 border-b border-[#222] pb-4">
-              <h2 className="text-3xl font-serif italic text-white flex items-center gap-4">
+              <h2 className="text-3xl font-serif italic text-slate-300 flex items-center gap-4">
                 <span className="text-[#d4af37] text-4xl">/</span>
                 The Collection
-                <span className="text-xs font-sans not-italic text-slate-600 bg-[#111] px-2 py-1 border border-[#222] ml-2">
+                <span className="text-xs font-sans not-italic text-slate-500 bg-[#111] px-2 py-1 border border-[#222] ml-2">
                   {items.length} ITEMS
                 </span>
               </h2>
@@ -206,12 +232,14 @@ const App: React.FC = () => {
 
             {/* Video Maker Section */}
             {allImagesReady && (
+              <div ref={videoProductionRef}>
               <VideoMaker
                 images={items}
                 originalText={lastInputText}
                 aspectRatio={currentRatio}
                 style={currentStyle}
               />
+              </div>
             )}
           </div>
         )}

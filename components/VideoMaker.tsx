@@ -822,7 +822,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
   if (validImages.length < 1) return null;
 
   return (
-    <div className="mt-24 bg-[#0a0a0a] border border-[#222] rounded-sm p-8 text-white shadow-2xl relative overflow-hidden">
+    <div className="mt-24 bg-[#0a0a0a] border border-[#222] rounded-sm p-8 text-slate-300 shadow-2xl relative overflow-hidden">
       <div className="absolute top-0 right-0 w-64 h-64 bg-slate-800/5 rounded-full blur-3xl -z-0 pointer-events-none"></div>
 
       <div className="flex flex-col gap-8 relative z-10">
@@ -858,7 +858,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
         )}
         <div className="flex flex-col md:flex-row items-center justify-between gap-8 border-b border-[#222] pb-6">
           <div>
-            <h3 className="text-2xl font-serif italic text-white flex items-center gap-3">
+            <h3 className="text-2xl font-serif italic text-slate-300 flex items-center gap-3">
               <span className="text-[#d4af37]">/</span> Video Production
             </h3>
             <p className="text-slate-500 text-xs mt-2 uppercase tracking-widest">
@@ -993,14 +993,14 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
                       disabled={status !== 'idle'}
                       className="w-24 h-1.5 bg-[#222] rounded-full appearance-none cursor-pointer accent-[#d4af37] disabled:opacity-50"
                     />
-                    <span className="text-[10px] text-slate-400 tabular-nums w-10" title="滑块 100% = 原音 40%">{bgmVolume}%</span>
+                    <span className="text-[10px] text-slate-500 tabular-nums w-10" title="滑块 100% = 原音 40%">{bgmVolume}%</span>
                   </div>
                 )}
               </div>
 
               {status === 'idle' && (
                 <>
-                  <label className="flex items-center gap-2 text-slate-400 text-xs cursor-pointer select-none">
+                  <label className="flex items-center gap-2 text-slate-500 text-xs cursor-pointer select-none">
                     <input
                       type="checkbox"
                       checked={lowSpecMode}
@@ -1050,7 +1050,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
               </a>
               <button
                 onClick={() => setStatus('idle')}
-                className="text-slate-500 hover:text-white px-4 py-2 text-xs uppercase tracking-widest border border-transparent hover:border-white/20"
+                className="text-slate-500 hover:text-slate-300 px-4 py-2 text-xs uppercase tracking-widest border border-transparent hover:border-slate-500/50"
               >
                 Reset
               </button>

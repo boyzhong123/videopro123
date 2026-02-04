@@ -1,6 +1,8 @@
 export interface GeneratedItem {
   id: string;
   prompt: string;
+  /** 对应的中文/原文场景描述，便于用户理解图与内容的对应关系 */
+  sceneText?: string;
   imageUrl?: string;
   loading: boolean;
   error?: string;

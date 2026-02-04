@@ -6,7 +6,7 @@ const Header: React.FC = () => {
       {/* Decorative Line */}
       <div className="w-16 h-[1px] bg-gradient-to-r from-transparent via-yellow-600/50 to-transparent mx-auto mb-6"></div>
       
-      <h1 className="text-5xl md:text-7xl font-serif italic text-transparent bg-clip-text bg-gradient-to-b from-white via-slate-200 to-slate-500 mb-6 tracking-wide drop-shadow-lg">
+      <h1 className="text-5xl md:text-7xl font-serif italic text-transparent bg-clip-text bg-gradient-to-b from-slate-200 via-slate-300 to-slate-500 mb-6 tracking-wide drop-shadow-lg pb-1 overflow-visible leading-[1.15]">
         The Inspiration Gallery
       </h1>
       <h2 className="text-xl md:text-2xl font-serif text-slate-400 mb-4 tracking-widest uppercase text-[0.8em]">

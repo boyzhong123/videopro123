@@ -35,7 +35,7 @@ const ResultCard: React.FC<ResultCardProps> = ({ item, aspectRatio, onRetry, onI
                 <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center justify-center">
                     <button
                         onClick={() => onRetry(item.id)}
-                        className="bg-white/10 hover:bg-white/20 backdrop-blur-md border border-white/30 text-white px-4 py-2 rounded-sm text-xs uppercase tracking-widest font-medium transition-all transform translate-y-2 group-hover:translate-y-0"
+                        className="bg-slate-500/20 hover:bg-slate-500/30 backdrop-blur-md border border-slate-400/40 text-slate-300 px-4 py-2 rounded-sm text-xs uppercase tracking-widest font-medium transition-all transform translate-y-2 group-hover:translate-y-0"
                     >
                         Regenerate
                     </button>
@@ -83,7 +83,10 @@ const ResultCard: React.FC<ResultCardProps> = ({ item, aspectRatio, onRetry, onI
             <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em]">Exhibit No. {item.id}</h3>
             {item.imageUrl && <span className="w-1.5 h-1.5 bg-[#d4af37] rounded-full shadow-[0_0_8px_rgba(212,175,55,0.6)]"></span>}
         </div>
-        <p className="text-xs text-slate-400 leading-relaxed font-serif italic opacity-70 flex-1 overflow-y-auto max-h-24 custom-scrollbar">
+        {item.sceneText && (
+          <p className="text-xs text-slate-300 mb-2 font-medium">{item.sceneText}</p>
+        )}
+        <p className="text-xs text-slate-500 leading-relaxed font-serif italic flex-1 overflow-y-auto max-h-24 custom-scrollbar">
           "{item.prompt}"
         </p>
       </div>
