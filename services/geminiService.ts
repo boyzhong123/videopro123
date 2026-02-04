@@ -47,7 +47,8 @@ const generateFallbackPrompt = (
   userInput: string,
   style: string,
   viewDistance: string,
-  variation: string
+  variation: string,
+  sceneFocus?: string
 ): string => {
   const styleKeywords: Record<string, string> = {
     'Photorealistic': 'cinematic film still, hyper-realistic, 8k resolution, ray tracing, highly detailed texture, atmospheric lighting, Arri Alexa, bokeh',
@@ -70,35 +71,119 @@ const generateFallbackPrompt = (
   const viewDesc = viewKeywords[viewDistance] || 'cinematic shot';
   const eraNote = 'consistent time period and era, no anachronism, same world and story.';
   const noText = 'no text, no words, no letters, no writing, no captions in the image.';
-  return `(Masterpiece, top quality) ${viewDesc} of ${userInput}. ${eraNote} ${variation}. ${extraStyle}, dramatic lighting, trending on ArtStation, vivid details, sharp focus. ${noText}`;
+  const subject = (sceneFocus && sceneFocus.trim()) ? sceneFocus.trim() : userInput;
+  return `(Masterpiece, top quality) ${viewDesc} of ${subject}. ${eraNote} ${variation}. ${extraStyle}, dramatic lighting, trending on ArtStation, vivid details, sharp focus. ${noText}`;
+};
+
+/**
+ * 将用户的一段话切分为 N 个场景描述，用于视频分镜（每句/每段对应一张图）。
+ * 优先调用豆包 API；失败时用本地按句切分。
+ */
+const splitParagraphIntoScenes = async (paragraph: string, count: number): Promise<string[]> => {
+  const trimmed = paragraph.trim();
+  if (count <= 0) return [];
+  if (count === 1) return [trimmed];
+
+  const modelId = "doubao-seed-1-8-251228";
+  const originalEndpoint = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
+  const endpoint = getProxyUrl(originalEndpoint + "?_t=" + Date.now());
+
+  const systemPrompt = `You are a video storyboard assistant. Split the user's paragraph into exactly ${count} scene descriptions for keyframes, in order. Each scene = one image for the video.
+Output format: exactly ${count} lines. One scene per line. No numbering, no bullets, no extra explanation. Each line should be a short scene description (can be in Chinese or English).`;
+
+  const userMessage = `Split this into exactly ${count} scenes (one per line):\n\n${trimmed}`;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${getDoubaoApiKey()}`,
+      },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userMessage },
+        ],
+        stream: false,
+        temperature: 0.3,
+        max_tokens: 800,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) throw new Error(`Status ${response.status}`);
+    const rawText = await response.text();
+    const data = JSON.parse(rawText);
+    const content = data.choices?.[0]?.message?.content;
+    if (!content || typeof content !== "string") throw new Error("Empty response");
+
+    const lines = content
+      .split(/\n+/)
+      .map((s: string) => s.replace(/^\s*[\d\.\-\*]+\s*/, "").trim())
+      .filter((s: string) => s.length > 0);
+
+    if (lines.length >= count) {
+      return lines.slice(0, count);
+    }
+    if (lines.length > 0) {
+      while (lines.length < count) lines.push(lines[lines.length - 1]);
+      return lines.slice(0, count);
+    }
+  } catch (e) {
+    console.warn("splitParagraphIntoScenes API failed, using local split:", e);
+  }
+
+  // 本地回退：按句号、问号、感叹号、换行切分，再取前 N 段或均匀分配
+  const sentences = trimmed
+    .split(/[。！？.!?\n]+/)
+    .map(s => s.trim())
+    .filter(s => s.length > 0);
+  if (sentences.length === 0) return Array(count).fill(trimmed);
+
+  const result: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const idx = Math.floor((i * sentences.length) / count);
+    result.push(sentences[Math.min(idx, sentences.length - 1)] || trimmed);
+  }
+  return result;
 };
 
 /**
  * Helper: Generate a SINGLE prompt via API
  * Optimized for Video Keyframes: Richer detail, cinematic terms.
+ * sceneFocus = 本张图对应的那一段话/那一句，只描述该场景。
  */
 const generateSinglePromptWithDoubao = async (
   userInput: string,
   style: string,
   viewDistance: string,
-  variationInstruction: string,
-  index: number
+  sceneFocus: string,
+  index: number,
+  totalCount: number
 ): Promise<string> => {
   const modelId = "doubao-seed-1-8-251228";
   const originalEndpoint = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
   const endpoint = getProxyUrl(originalEndpoint + (originalEndpoint.includes("?") ? "&" : "?") + "_t=" + (Date.now() + index));
 
+  const sceneHint = totalCount > 1
+    ? `\n    This is keyframe ${index + 1} of ${totalCount}. The image must depict ONLY this part of the story: "${sceneFocus}". Same world and style as the full story, but this frame's content is strictly this scene.`
+    : "";
+
   const systemPrompt = `
     You are an expert Film Concept Artist.
-    Task: Write ONE highly detailed, cinematic image generation prompt based on the user's input.
+    Task: Write ONE highly detailed, cinematic image generation prompt for a VIDEO keyframe.
     
-    The prompt will be used to generate a keyframe for a VIDEO. All keyframes must feel like the same story and world.
-    AVOID simple or short descriptions.
+    The full story/paragraph context: "${userInput}"
+    This keyframe must show ONLY this scene (one part of the story): "${sceneFocus}"
+    All keyframes together form one video, so keep the same world and style. AVOID simple or short descriptions.${sceneHint}
     
-    User Input: "${userInput}"
     Target Style: "${style}"
     Camera Distance: "${viewDistance}"
-    Specific Focus: "${variationInstruction}"
     
     Requirements:
     1. Start with the main subject and action.
@@ -166,8 +251,8 @@ const generateSinglePromptWithDoubao = async (
 };
 
 /**
- * Generates multiple prompts. 
- * ROBUST STRATEGY: Try API -> If 504/Fail -> Use Local Fallback instantly.
+ * Generates multiple prompts: 一段话按句/按场景切分为 N 段，每段对应一张图（视频分镜）。
+ * 1. 先将整段话切分为 N 个场景描述；2. 再为每个场景生成一张图的英文提示词。
  */
 const generatePromptsParallel = async (
   userInput: string,
@@ -175,21 +260,21 @@ const generatePromptsParallel = async (
   count: number,
   viewDistance: string
 ): Promise<string[]> => {
-
-  const variations = [
-    { instruction: "Focus on dramatic lighting, atmosphere, and mood. Keep the same time period/era as the user's scene (no mixing primitive and modern).", suffix: "dramatic cinematic lighting, atmospheric, volumetric fog, moody, same era" },
-    { instruction: "Focus on intricate textures, material details. Maintain era consistency: buildings and people must belong to one coherent time period.", suffix: "intricate details, highly textured, 8k resolution, coherent era, no anachronism" },
-    { instruction: "Focus on dynamic composition, depth of field. Same world and era throughout—no cavemen with modern cities or vice versa.", suffix: "dynamic angle, depth of field, rule of thirds, consistent time period" },
-    { instruction: "Focus on vibrant color theory, contrast. Keep clothing, architecture, and props from a single era.", suffix: "vibrant colors, high contrast, color graded, single era throughout" },
-    { instruction: "Focus on environmental storytelling. Ensure architecture and people match the same historical or modern setting.", suffix: "detailed background, environmental storytelling, same era and world" },
-    { instruction: "Focus on artistic interpretation and style. One consistent time period for the whole video.", suffix: "artistic interpretation, masterpiece, award winning, era consistent" },
+  const scenes = await splitParagraphIntoScenes(userInput, count);
+  const fallbackSuffixes = [
+    "dramatic cinematic lighting, same era",
+    "intricate details, 8k resolution, coherent era",
+    "dynamic angle, depth of field, same era",
+    "vibrant colors, color graded, single era",
+    "detailed background, environmental storytelling, same era",
+    "artistic interpretation, masterpiece, era consistent",
   ];
 
   const promises = Array.from({ length: count }).map(async (_, i) => {
-    const v = variations[i % variations.length];
+    const sceneFocus = scenes[i] ?? userInput;
 
     try {
-      const apiResult = await generateSinglePromptWithDoubao(userInput, style, viewDistance, v.instruction, i);
+      const apiResult = await generateSinglePromptWithDoubao(userInput, style, viewDistance, sceneFocus, i, count);
       if (apiResult && apiResult.length > 20) {
         return apiResult;
       }
@@ -197,11 +282,9 @@ const generatePromptsParallel = async (
       console.warn(`Prompt ${i} API call error:`, err);
     }
 
-    // API 失败或返回空，用本地 fallback
-    return generateFallbackPrompt(userInput, style, viewDistance, v.suffix);
+    return generateFallbackPrompt(userInput, style, viewDistance, fallbackSuffixes[i % fallbackSuffixes.length], sceneFocus);
   });
 
-  // 所有 Promise 都有 fallback，不会 reject
   return Promise.all(promises);
 };
 
@@ -279,7 +362,12 @@ function isVolcesImageUrlComplete(url: string): boolean {
  * base_url: https://ark.cn-beijing.volces.com/api/v3
  * 官方案例：client.images.generate(model="doubao-seedream-4-5-251128", prompt=..., size="2K", response_format="url", extra_body={"watermark": True})
  */
-export const generateImageFromPrompt = async (prompt: string, aspectRatio: string = "1:1"): Promise<string> => {
+/** imageIndex: 多图时传入 0-based 序号，用于不同 seed 提升画面差异度 */
+export const generateImageFromPrompt = async (
+  prompt: string,
+  aspectRatio: string = "1:1",
+  imageIndex?: number
+): Promise<string> => {
   lastImageGenDebugSnippet = "";
   const originalEndpoint = "https://ark.cn-beijing.volces.com/api/v3/images/generations";
 
@@ -301,12 +389,16 @@ export const generateImageFromPrompt = async (prompt: string, aspectRatio: strin
   };
   const size = sizeMap[aspectRatio] ?? "2K";
 
+  // 多图时每张用不同 seed，降低相似度；单张或不传时用 -1 随机
+  const seed = imageIndex !== undefined ? 10000 + imageIndex : -1;
+
   const body = JSON.stringify({
     model: "doubao-seedream-4-5-251128",
     prompt: `${prompt.trim()} No text, no words, no letters, no writing, no captions in the image.`,
     size,
     response_format: "url",
     watermark: true,
+    seed,
   });
   const headers = {
     "Content-Type": "application/json",

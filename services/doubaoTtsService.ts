@@ -54,10 +54,12 @@ function getDoubaoKey(): { accessKey: string; appId: string; bigttsInstanceId: s
 /** 1.0 资源（适用于 ICL 音色 Charlie / Xavier） */
 const RESOURCE_ID_TTS_1 = "volc.service_type.10029";
 
-/** 豆包 TTS 音色列表（仅 1.0：Shiny / Alvin） */
+/** 豆包 TTS 音色列表（1.0：Shiny / Alvin；2.0：Corey / Emotional 等） */
 export const DOUBAO_SPEAKERS = [
   { id: "zh_female_cancan_mars_bigtts", label: "Shiny" },
   { id: "zh_male_wennuanahu_moon_bigtts", label: "Alvin" },
+  { id: "en_male_corey_emo_v2_mars_bigtts", label: "Corey" },
+  { id: "en_female_emotional_moon_bigtts", label: "Emotional" },
 ] as const;
 
 export const DOUBAO_EMOTIONS = [

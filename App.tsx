@@ -62,9 +62,9 @@ const App: React.FC = () => {
       setItems(newItems);
       setIsProcessing(false); // Text gen done, images process in background
 
-      // Step 2: Generate Images in parallel for each prompt
+      // Step 2: Generate Images in parallel for each prompt（传入 index 用于不同 seed，降低多图相似度）
       prompts.forEach((prompt, index) => {
-        triggerImageGeneration((index + 1).toString(), prompt, aspectRatio);
+        triggerImageGeneration((index + 1).toString(), prompt, aspectRatio, index);
       });
 
     } catch (error) {
@@ -74,9 +74,9 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const triggerImageGeneration = async (id: string, prompt: string, aspectRatio: string) => {
+  const triggerImageGeneration = async (id: string, prompt: string, aspectRatio: string, imageIndex?: number) => {
     try {
-      const imageUrl = await generateImageFromPrompt(prompt, aspectRatio);
+      const imageUrl = await generateImageFromPrompt(prompt, aspectRatio, imageIndex);
 
       setItems(currentItems =>
         currentItems.map(item =>
@@ -129,8 +129,9 @@ const App: React.FC = () => {
       )
     );
 
-    // Trigger generation again
-    triggerImageGeneration(id, itemToRetry.prompt, currentRatio);
+    // Trigger generation again（重试时沿用同一 index 的 seed，保证可复现）
+    const index = parseInt(id, 10) - 1;
+    triggerImageGeneration(id, itemToRetry.prompt, currentRatio, index >= 0 ? index : undefined);
   }, [items, currentRatio]);
 
   const allImagesReady = items.length > 0 && items.every(item => !item.loading && item.imageUrl);

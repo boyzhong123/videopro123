@@ -55,14 +55,14 @@ const InputArea: React.FC<InputAreaProps> = ({ onGenerate, isLoading }) => {
         {/* Text Input */}
         <div className="flex flex-col gap-4">
           <label htmlFor="prompt-input" className="font-serif text-xl italic text-slate-300">
-            1. The Vision <span className="text-xs not-italic text-slate-600 ml-2 tracking-wide uppercase">/ 描述您的创意</span>
+            1. The Vision <span className="text-xs not-italic text-slate-600 ml-2 tracking-wide uppercase">/ 一段话，按句生成不同场景</span>
           </label>
           <div className="relative group">
             <textarea
               id="prompt-input"
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
-              placeholder="E.g. An astronaut resting in a field of glowing flowers on Mars..."
+              placeholder="例如：春天来了。小鸟在树上唱歌。孩子们在草地上玩耍。夕阳把云朵染成金色。（将按句/按场景生成对应张数的分镜图）"
               className="w-full p-6 text-slate-200 bg-[#111] border border-[#333] focus:border-[#d4af37] focus:ring-1 focus:ring-[#d4af37]/50 rounded-sm focus:outline-none transition-all resize-none h-36 placeholder-slate-700 font-light leading-relaxed"
               disabled={isLoading}
             />
@@ -154,10 +154,10 @@ const InputArea: React.FC<InputAreaProps> = ({ onGenerate, isLoading }) => {
               </div>
             </div>
 
-            {/* Quantity Slider */}
+            {/* Quantity Slider: 1–10 张，对应一段话的 N 个场景 */}
             <div className="flex flex-col gap-4">
                <label className="font-serif text-xl italic text-slate-300 flex justify-between items-end">
-                 4. Quantity <span className="text-xs not-italic text-[#d4af37] tracking-widest font-mono text-lg">{imageCount} IMAGES</span>
+                 4. 场景数量 <span className="text-xs not-italic text-[#d4af37] tracking-widest font-mono text-lg">{imageCount} 张</span>
                </label>
                <input 
                  type="range" 
