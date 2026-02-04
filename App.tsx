@@ -174,19 +174,6 @@ const App: React.FC = () => {
           </div>
         )}
 
-        <div className="mb-6 flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            onClick={loadPresetImages}
-            disabled={isProcessing}
-            className="text-sm text-slate-500 hover:text-[#d4af37] border border-[#333] hover:border-[#d4af37]/50 px-4 py-2 rounded transition-colors disabled:opacity-50"
-            title="加载 4 张预设图，不调用作图接口，可直接测视频/语音合成"
-          >
-            使用预设 4 张图（不花钱测合成）
-          </button>
-          <span className="text-xs text-slate-600">若文案为空会填入测试句，可直接到下方「Video Production」开始合成。预设图不扣生图费；语音仍会调用豆包 TTS（同句已缓存，重复合成不重复扣费）</span>
-        </div>
-
         <InputArea onGenerate={handleGenerate} isLoading={isProcessing} />
 
         {items.length > 0 && (
