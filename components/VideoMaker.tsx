@@ -90,7 +90,8 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
   const [selectedSpeed, setSelectedSpeed] = useState(0.85);
   const [selectedMusic, setSelectedMusic] = useState('mixkit-classical-10-717'); // 默认 古典钢琴叙事
   const [bgmVolume, setBgmVolume] = useState(60); // 滑块 0–100，实际音量 = 滑块% × 40%（最大原音 40%），默认 60%
-  const [lowSpecMode, setLowSpecMode] = useState(false); // 流畅优先：电脑配置不高时勾选，降低预渲染与码率减轻卡顿
+  const [lowSpecMode, setLowSpecMode] = useState(false); // 流畅模式：降低预渲染与码率减轻卡顿
+  const [fastAudioMode, setFastAudioMode] = useState(true); // 极速模式：音频并行合成加速
 
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
   const [isVoicePreviewLoading, setIsVoicePreviewLoading] = useState(false);
@@ -369,15 +370,19 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       const PAUSE_BETWEEN_SENTENCES = 0.35; // 句间静音 0.35 秒
 
       // 1. 按句合成音频，得到每句的 PCM 和实际时长
-      const segmentBuffers: ArrayBuffer[] = [];
-      const segmentDurations: number[] = [];
-      for (let i = 0; i < sentences.length; i++) {
-        const buf = await generateSpeech(sentences[i], selectedSpeaker, speechOptions);
-        segmentBuffers.push(buf);
-        const samples = buf.byteLength / 2;
-        segmentDurations.push(samples / SAMPLE_RATE);
-        // 延时已移除 (User request: concurrency limit is high enough)
+      const segmentBuffers: ArrayBuffer[] = fastAudioMode
+        ? await Promise.all(
+          sentences.map((sentence) => generateSpeech(sentence, selectedSpeaker, speechOptions))
+        )
+        : [];
+      if (!fastAudioMode) {
+        for (let i = 0; i < sentences.length; i++) {
+          const buf = await generateSpeech(sentences[i], selectedSpeaker, speechOptions);
+          segmentBuffers.push(buf);
+          // 延时已移除 (User request: concurrency limit is high enough)
+        }
       }
+      const segmentDurations: number[] = segmentBuffers.map((buf) => (buf.byteLength / 2) / SAMPLE_RATE);
 
       // 2. 拼接 PCM：句1 + 静音 + 句2 + 静音 + …（句间静音 0.35s）
       const silenceSamples = Math.round(PAUSE_BETWEEN_SENTENCES * SAMPLE_RATE);
@@ -555,11 +560,12 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       canvas.height = dims.height;
 
       const animConfigs = usefulImages.map((_, i) => generateAnimationConfig(i));
-      // 流畅优先（低配勾选）：预渲染与码率降低；否则保持 1280/2560，仅 8 张以上才缩小
+      // 流畅优先（低配勾选/多图自动降级）：预渲染与码率降低
       const imgCount = usefulImages.length;
-      const MAX_SOURCE_SIZE = lowSpecMode ? 960 : (imgCount >= 8 ? 960 : 1280);
+      const autoLowSpec = lowSpecMode || imgCount >= 8;
+      const MAX_SOURCE_SIZE = autoLowSpec ? 960 : 1280;
       const MAX_SCALE = 1.15;
-      const MAX_PRE_SIZE = lowSpecMode ? 1920 : (imgCount >= 8 ? 1920 : 2560);
+      const MAX_PRE_SIZE = autoLowSpec ? 1920 : 2560;
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = MAX_SOURCE_SIZE;
       tempCanvas.height = MAX_SOURCE_SIZE;
@@ -614,7 +620,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       ctx.textBaseline = 'middle';
       const precomputedSubtitleLines: string[][] = timedSubtitles.map(s => wrapText(ctx, s.text.trim(), subtitleMaxWidth));
 
-      const canvasStream = canvas.captureStream(30);
+      const canvasStream = canvas.captureStream(autoLowSpec ? 24 : 30);
       stream = new MediaStream([
         ...canvasStream.getVideoTracks(),
         ...dest.stream.getAudioTracks()
@@ -624,7 +630,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
 
       mediaRecorder = new MediaRecorder(stream, {
         mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'video/webm',
-        videoBitsPerSecond: lowSpecMode ? 3000000 : 4000000
+        videoBitsPerSecond: autoLowSpec ? 3000000 : 4000000
       });
 
       const chunks: Blob[] = [];
@@ -667,7 +673,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       if (musicSource) musicSource.start(startTime);
 
       // 流畅优先或 4 张以上用 24fps；requestAnimationFrame 按实际刷新率跑，不堆积
-      const RENDER_FPS = lowSpecMode || usefulImages.length >= 4 ? 24 : 30;
+      const RENDER_FPS = autoLowSpec || usefulImages.length >= 4 ? 24 : 30;
       const renderLoop = () => {
         const currentTime = audioCtx!.currentTime;
         const elapsed = currentTime - startTime;
@@ -822,10 +828,13 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
   if (validImages.length < 1) return null;
 
   return (
-    <div className="mt-24 bg-[#0a0a0a] border border-[#222] rounded-sm p-8 text-slate-300 shadow-2xl relative overflow-hidden">
-      <div className="absolute top-0 right-0 w-64 h-64 bg-slate-800/5 rounded-full blur-3xl -z-0 pointer-events-none"></div>
+    <div className="mt-12 md:mt-24 bg-gradient-to-br from-[#0a0a0a] via-[#0d0d0d] to-[#0a0a0a] border border-[#1a1a1a] md:border-[#222] rounded-lg md:rounded-xl p-4 md:p-10 text-slate-300 shadow-2xl relative overflow-hidden">
+      {/* 装饰性背景元素 */}
+      <div className="absolute top-0 right-0 w-64 md:w-96 h-64 md:h-96 bg-[#d4af37]/[0.02] rounded-full blur-3xl -z-0 pointer-events-none"></div>
+      <div className="absolute bottom-0 left-0 w-48 md:w-64 h-48 md:h-64 bg-slate-500/[0.02] rounded-full blur-3xl -z-0 pointer-events-none"></div>
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full h-px bg-gradient-to-r from-transparent via-[#222] to-transparent -z-0 pointer-events-none opacity-50"></div>
 
-      <div className="flex flex-col gap-8 relative z-10">
+      <div className="flex flex-col gap-6 md:gap-8 relative z-10">
         {lastErrorDetail && (
           <div className="rounded-sm border border-amber-900/50 bg-amber-950/20 p-3">
             <button
@@ -856,18 +865,20 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
             )}
           </div>
         )}
-        <div className="flex flex-col md:flex-row items-center justify-between gap-8 border-b border-[#222] pb-6">
-          <div>
-            <h3 className="text-2xl font-serif italic text-slate-300 flex items-center gap-3">
-              <span className="text-[#d4af37]">/</span> Video Production
+        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 md:gap-10 border-b border-[#1a1a1a] md:border-[#222] pb-4 md:pb-8">
+          <div className="w-full md:w-auto">
+            <h3 className="text-xl md:text-3xl font-serif italic text-slate-200 flex items-center gap-3 md:gap-4">
+              <span className="text-[#d4af37] text-2xl md:text-4xl font-light">/</span> 
+              <span className="bg-gradient-to-r from-slate-200 to-slate-400 bg-clip-text text-transparent">Video Production</span>
             </h3>
-            <p className="text-slate-500 text-xs mt-2 uppercase tracking-widest">
+            <p className="text-slate-500 text-[10px] md:text-xs mt-1 md:mt-3 uppercase tracking-[0.2em] md:tracking-[0.3em]">
               Synthesize Gallery into Motion
             </p>
           </div>
 
-          <div className="flex flex-col gap-4 items-end w-full md:w-auto">
-            <div className="flex flex-wrap items-center gap-3 justify-end w-full relative">
+          <div className="flex flex-col gap-3 md:gap-6 items-stretch md:items-end w-full md:w-auto">
+            {/* 控制面板 - 网格布局 */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 gap-3 md:gap-4 lg:gap-5 w-full md:w-[520px] lg:w-[640px] relative">
               {status === 'done' && (
                 <div
                   className="absolute inset-0 z-10 cursor-pointer"
@@ -876,25 +887,45 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
                   aria-hidden
                 />
               )}
-              {/* 语音 */}
-              <div className="flex items-center gap-2 bg-[#151515] p-1 rounded-sm border border-[#222]">
-                <span className="text-[10px] text-slate-500 uppercase font-bold tracking-widest px-2">语音</span>
+              
+              {/* 语音选择器 */}
+              <div className="flex items-center gap-3 bg-[#111]/80 md:bg-[#131313] p-2.5 md:p-3 rounded-lg border border-[#222] md:border-[#252525] backdrop-blur-sm transition-all hover:border-[#333] md:hover:border-[#2a2a2a]">
+                <span className="text-[10px] text-[#d4af37]/70 uppercase font-semibold tracking-widest shrink-0">语音</span>
                 <select
                   value={selectedSpeaker}
                   onChange={(e) => setSelectedSpeaker(e.target.value)}
                   disabled={status !== 'idle'}
-                  className="bg-[#111] text-slate-300 text-xs uppercase tracking-wider px-2 py-1.5 border-0 focus:outline-none min-w-[140px]"
+                  className="bg-[#0a0a0a] md:bg-[#0d0d0d] text-slate-300 text-xs uppercase tracking-wider px-3 py-2 border-0 rounded-md focus:outline-none focus:ring-1 focus:ring-[#d4af37]/30 flex-1 min-w-0 sm:min-w-[100px] md:min-w-[130px] transition-all"
                 >
                   {DOUBAO_SPEAKERS.map((s) => (
                     <option key={s.id} value={s.id}>{s.label}</option>
                   ))}
                 </select>
-                <span className="text-[10px] text-slate-500 uppercase font-bold tracking-widest px-1">情感</span>
+              </div>
+              
+              {/* 倍速选择器 */}
+              <div className="flex items-center gap-3 bg-[#111]/80 md:bg-[#131313] p-2.5 md:p-3 rounded-lg border border-[#222] md:border-[#252525] backdrop-blur-sm transition-all hover:border-[#333] md:hover:border-[#2a2a2a]">
+                <span className="text-[10px] text-[#d4af37]/70 uppercase font-semibold tracking-widest shrink-0">倍速</span>
+                <select
+                  value={String(selectedSpeed)}
+                  onChange={(e) => setSelectedSpeed(parseFloat(e.target.value))}
+                  disabled={status !== 'idle'}
+                  className="bg-[#0a0a0a] md:bg-[#0d0d0d] text-slate-300 text-xs uppercase tracking-wider rounded-md px-3 py-2 border-0 focus:outline-none focus:ring-1 focus:ring-[#d4af37]/30 flex-1 min-w-0 sm:min-w-[70px] transition-all"
+                >
+                  {SPEEDS.map((s) => (
+                    <option key={s.value} value={String(s.value)}>{s.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* 情感选择器 + 试听 */}
+              <div className="flex items-center gap-3 bg-[#111]/80 md:bg-[#131313] p-2.5 md:p-3 rounded-lg border border-[#222] md:border-[#252525] backdrop-blur-sm transition-all hover:border-[#333] md:hover:border-[#2a2a2a]">
+                <span className="text-[10px] text-[#d4af37]/70 uppercase font-semibold tracking-widest shrink-0">情感</span>
                 <select
                   value={selectedEmotion}
                   onChange={(e) => setSelectedEmotion(e.target.value)}
                   disabled={status !== 'idle'}
-                  className="bg-[#111] text-slate-300 text-xs uppercase tracking-wider px-2 py-1.5 border-0 focus:outline-none min-w-[90px]"
+                  className="bg-[#0a0a0a] md:bg-[#0d0d0d] text-slate-300 text-xs uppercase tracking-wider px-3 py-2 border-0 rounded-md focus:outline-none focus:ring-1 focus:ring-[#d4af37]/30 flex-1 min-w-0 sm:min-w-[90px] md:min-w-[110px] transition-all"
                 >
                   {DOUBAO_EMOTIONS.map((e) => (
                     <option key={e.id || 'default'} value={e.id}>{e.label}</option>
@@ -903,87 +934,59 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
                 <button
                   onClick={handleVoicePreview}
                   disabled={isVoicePreviewLoading}
-                  className="px-2 py-1 text-[#d4af37] hover:text-white disabled:opacity-50"
-                  title="试听"
+                  className="p-2 text-[#d4af37] hover:text-[#e5c04a] hover:bg-[#d4af37]/10 disabled:opacity-50 shrink-0 rounded-md transition-all"
+                  title="试听语音"
                 >
                   {isVoicePreviewLoading ? (
-                    <span className="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin block" />
+                    <span className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin block" />
                   ) : (
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4 md:w-5 md:h-5">
                       <path d="M13.5 4.06c0-1.336-1.616-2.005-2.56-1.06l-4.5 4.5H4.508c-1.141 0-2.318.664-2.66 1.905A9.76 9.76 0 001.5 12c0 2.485.586 4.815 1.632 6.845.334 1.148 1.442 1.748 2.66 1.748h.092l4.5 4.5c.944.945 2.56.276 2.56-1.06V4.06z" />
                     </svg>
                   )}
                 </button>
               </div>
 
-              {/* 倍速：0.7x ~ 1.3x */}
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">倍速</span>
+              {/* BGM选择器 + 试听 + 音量 */}
+              <div className="flex flex-wrap items-center gap-2.5 bg-[#111]/80 md:bg-[#131313] rounded-lg border border-[#222] md:border-[#252525] p-2.5 md:p-3 backdrop-blur-sm transition-all hover:border-[#333] md:hover:border-[#2a2a2a] sm:col-span-2 md:col-span-1">
+                <span className="text-[10px] text-[#d4af37]/70 uppercase font-semibold tracking-widest shrink-0">BGM</span>
                 <select
-                  value={String(selectedSpeed)}
-                  onChange={(e) => setSelectedSpeed(parseFloat(e.target.value))}
-                  disabled={status !== 'idle'}
-                  className="bg-[#151515] text-slate-300 text-xs uppercase tracking-wider rounded-sm px-3 py-2 border border-[#333] focus:outline-none focus:border-[#d4af37]"
+                  value={selectedMusic}
+                  onChange={(e) => setSelectedMusic(e.target.value)}
+                  disabled={status !== 'idle' || isMusicPreviewLoading}
+                  className="bg-[#0a0a0a] md:bg-[#0d0d0d] text-slate-300 text-xs uppercase tracking-wider px-3 py-2 rounded-md focus:outline-none focus:ring-1 focus:ring-[#d4af37]/30 flex-1 min-w-0 sm:min-w-[100px] md:min-w-[120px] transition-all"
                 >
-                  {SPEEDS.map((s) => (
-                    <option key={s.value} value={String(s.value)}>{s.label}</option>
+                  {BGM_TRACKS.map((m) => (
+                    <option key={m.id} value={m.id} className="bg-[#111]">{m.label}</option>
                   ))}
                 </select>
-              </div>
-
-            </div>
-
-            <div className="flex flex-wrap items-center gap-3 justify-end w-full relative">
-              {status === 'done' && (
-                <div
-                  className="absolute inset-0 z-10 cursor-pointer"
-                  onClick={showResetToast}
-                  title="点击提示"
-                  aria-hidden
-                />
-              )}
-              {/* Music Selector with Preview */}
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">BGM:</span>
-                <div className="flex items-center gap-1 bg-[#151515] rounded-sm border border-[#333] p-0.5">
-                  <select
-                    value={selectedMusic}
-                    onChange={(e) => setSelectedMusic(e.target.value)}
-                    disabled={status !== 'idle' || isMusicPreviewLoading}
-                    className="bg-transparent text-slate-300 text-xs uppercase tracking-wider px-2 py-1.5 focus:outline-none min-w-[140px] max-w-[180px]"
-                  >
-                    {BGM_TRACKS.map((m) => (
-                      <option key={m.id} value={m.id} className="bg-[#111]">{m.label}</option>
-                    ))}
-                  </select>
-
-                  {selectedMusic !== 'none' && (
-                    <button
-                      onClick={toggleMusicPreview}
-                      disabled={status !== 'idle' || isMusicPreviewLoading}
-                      className={`p-1.5 transition-all ${isPlayingPreview
-                        ? 'text-red-400 hover:bg-[#222]'
-                        : 'text-[#d4af37] hover:bg-[#222]'
-                        }`}
-                      title={isPlayingPreview ? "Stop Preview" : "Play Preview"}
-                    >
-                      {isMusicPreviewLoading ? (
-                        <span className="w-4 h-4 border-2 border-[#d4af37] border-t-transparent rounded-full animate-spin block"></span>
-                      ) : isPlayingPreview ? (
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
-                          <path fillRule="evenodd" d="M6.75 5.25a.75.75 0 01.75-.75H9a.75.75 0 01.75.75v13.5a.75.75 0 01-.75.75H7.5a.75.75 0 01-.75-.75V5.25zm7.5 0A.75.75 0 0115 4.5h1.5a.75.75 0 01.75.75v13.5a.75.75 0 01-.75.75H15a.75.75 0 01-.75-.75V5.25z" clipRule="evenodd" />
-                        </svg>
-                      ) : (
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
-                          <path fillRule="evenodd" d="M4.5 5.653c0-1.426 1.529-2.33 2.779-1.643l11.54 6.348c1.295.712 1.295 2.573 0 3.285L7.28 19.991c-1.25.687-2.779-.217-2.779-1.643V5.653z" clipRule="evenodd" />
-                        </svg>
-                      )}
-                    </button>
-                  )}
-                </div>
                 {selectedMusic !== 'none' && (
-                  <div className="flex items-center gap-2 min-w-[140px]">
-                    <span className="text-[10px] text-slate-500 uppercase tracking-widest whitespace-nowrap">BGM 音量</span>
+                  <button
+                    onClick={toggleMusicPreview}
+                    disabled={status !== 'idle' || isMusicPreviewLoading}
+                    className={`p-2 transition-all shrink-0 rounded-md ${isPlayingPreview
+                      ? 'text-red-400 hover:bg-red-400/10'
+                      : 'text-[#d4af37] hover:text-[#e5c04a] hover:bg-[#d4af37]/10'
+                      }`}
+                    title={isPlayingPreview ? "停止" : "试听"}
+                  >
+                    {isMusicPreviewLoading ? (
+                      <span className="w-4 h-4 border-2 border-[#d4af37] border-t-transparent rounded-full animate-spin block"></span>
+                    ) : isPlayingPreview ? (
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4 md:w-5 md:h-5">
+                        <path fillRule="evenodd" d="M6.75 5.25a.75.75 0 01.75-.75H9a.75.75 0 01.75.75v13.5a.75.75 0 01-.75.75H7.5a.75.75 0 01-.75-.75V5.25zm7.5 0A.75.75 0 0115 4.5h1.5a.75.75 0 01.75.75v13.5a.75.75 0 01-.75.75H15a.75.75 0 01-.75-.75V5.25z" clipRule="evenodd" />
+                      </svg>
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4 md:w-5 md:h-5">
+                        <path fillRule="evenodd" d="M4.5 5.653c0-1.426 1.529-2.33 2.779-1.643l11.54 6.348c1.295.712 1.295 2.573 0 3.285L7.28 19.991c-1.25.687-2.779-.217-2.779-1.643V5.653z" clipRule="evenodd" />
+                      </svg>
+                    )}
+                  </button>
+                )}
+                {/* BGM 音量控制 */}
+                {selectedMusic !== 'none' && (
+                  <div className="flex items-center gap-2 w-full md:w-auto md:ml-auto">
+                    <span className="text-[10px] text-slate-500 uppercase tracking-widest whitespace-nowrap shrink-0 hidden md:inline">音量</span>
                     <input
                       type="range"
                       min={0}
@@ -991,47 +994,73 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
                       value={bgmVolume}
                       onChange={(e) => setBgmVolume(Number(e.target.value))}
                       disabled={status !== 'idle'}
-                      className="w-24 h-1.5 bg-[#222] rounded-full appearance-none cursor-pointer accent-[#d4af37] disabled:opacity-50"
+                      className="w-24 md:w-20 h-1.5 bg-[#222] rounded-full appearance-none cursor-pointer accent-[#d4af37] disabled:opacity-50"
                     />
-                    <span className="text-[10px] text-slate-500 tabular-nums w-10" title="滑块 100% = 原音 40%">{bgmVolume}%</span>
+                    <span className="text-[10px] text-[#d4af37]/60 tabular-nums w-8 shrink-0 font-medium">{bgmVolume}%</span>
                   </div>
                 )}
               </div>
-
-              {status === 'idle' && (
-                <>
-                  <label className="flex items-center gap-2 text-slate-500 text-xs cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={lowSpecMode}
-                      onChange={(e) => setLowSpecMode(e.target.checked)}
-                      className="rounded border-[#333] bg-[#111] text-[#d4af37] focus:ring-[#d4af37]"
-                    />
-                    <span>流畅优先（电脑配置不高时勾选）</span>
-                  </label>
-                  <button
-                    onClick={handleCreateVideo}
-                    className="bg-white hover:bg-[#d4af37] text-black hover:text-white px-6 py-2 rounded-sm font-serif italic text-lg transition-all shadow-[0_4px_14px_0_rgba(0,0,0,0.39)] flex items-center gap-2"
-                  >
-                    Generate Video
-                  </button>
-                </>
-              )}
             </div>
+
+            {/* 高级设置 */}
+            <div className="flex flex-col gap-2 bg-[#0f0f0f]/60 md:bg-transparent rounded-lg md:rounded-none border border-[#1f1f1f] md:border-0 p-2.5 md:p-0">
+              <div className="text-[10px] text-slate-500 uppercase tracking-[0.3em]">高级设置</div>
+              <div className="flex flex-wrap items-center gap-3 md:gap-4">
+                <label className="flex items-center gap-2 text-slate-500 md:text-slate-400 text-xs cursor-pointer select-none bg-[#111]/80 md:bg-transparent p-2.5 md:p-0 rounded-lg md:rounded-none border border-[#222] md:border-0 hover:text-slate-300 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={lowSpecMode}
+                    onChange={(e) => setLowSpecMode(e.target.checked)}
+                    disabled={status !== 'idle'}
+                    className="rounded border-[#333] bg-[#111] text-[#d4af37] focus:ring-[#d4af37] focus:ring-offset-0"
+                  />
+                  <span className="whitespace-nowrap">解决视频卡顿</span>
+                </label>
+                <label className="flex items-center gap-2 text-slate-500 md:text-slate-400 text-xs cursor-pointer select-none bg-[#111]/80 md:bg-transparent p-2.5 md:p-0 rounded-lg md:rounded-none border border-[#222] md:border-0 hover:text-slate-300 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={fastAudioMode}
+                    onChange={(e) => setFastAudioMode(e.target.checked)}
+                    disabled={status !== 'idle'}
+                    className="rounded border-[#333] bg-[#111] text-[#d4af37] focus:ring-[#d4af37] focus:ring-offset-0"
+                  />
+                  <span className="whitespace-nowrap">极速模式（音频并行合成）</span>
+                </label>
+              </div>
+            </div>
+
+            {/* 生成按钮区域 */}
+            {status === 'idle' && (
+              <div className="flex flex-col xs:flex-row items-stretch xs:items-center gap-3 md:gap-4 w-full md:w-auto md:justify-end pt-2 md:pt-0">
+                <button
+                  onClick={handleCreateVideo}
+                  className="group relative bg-gradient-to-r from-[#d4af37] to-[#c9a227] hover:from-[#e5c04a] hover:to-[#d4af37] text-black px-6 md:px-8 py-3 rounded-lg font-serif italic text-base md:text-lg transition-all shadow-[0_4px_20px_0_rgba(212,175,55,0.3)] hover:shadow-[0_6px_30px_0_rgba(212,175,55,0.4)] flex items-center justify-center gap-2 w-full sm:w-auto overflow-hidden"
+                >
+                  <span className="relative z-10">Generate Video</span>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 md:w-5 md:h-5 relative z-10 group-hover:translate-x-0.5 transition-transform">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+                  </svg>
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
         {/* Progress or Actions */}
-        <div className="flex justify-center mt-4">
+        <div className="flex justify-center mt-4 md:mt-8">
           {(status === 'generating_audio' || status === 'rendering' || status === 'finalizing') && (
-            <div className="flex flex-col items-center w-full max-w-md">
-              <div className="w-full bg-[#222] rounded-full h-1 mb-3 overflow-hidden">
+            <div className="flex flex-col items-center w-full max-w-lg px-4 md:px-0">
+              <div className="w-full bg-[#1a1a1a] md:bg-[#151515] rounded-full h-2 md:h-2.5 mb-4 overflow-hidden shadow-inner">
                 <div
-                  className="bg-[#d4af37] h-full transition-all duration-100 ease-linear shadow-[0_0_10px_#d4af37]"
-                  style={{ width: `${progress}%` }}
+                  className="bg-gradient-to-r from-[#d4af37] to-[#e5c04a] h-full transition-all duration-150 ease-out rounded-full"
+                  style={{ 
+                    width: `${progress}%`,
+                    boxShadow: '0 0 20px rgba(212, 175, 55, 0.5), 0 0 40px rgba(212, 175, 55, 0.2)'
+                  }}
                 ></div>
               </div>
-              <span className="text-xs text-[#d4af37] animate-pulse font-mono tracking-widest uppercase">
+              <span className="text-[10px] md:text-sm text-[#d4af37] font-mono tracking-widest uppercase text-center flex items-center gap-2">
+                <span className="w-2 h-2 bg-[#d4af37] rounded-full animate-pulse"></span>
                 {status === 'generating_audio' && 'Synthesizing Voice...'}
                 {status === 'rendering' && `Rendering Frames: ${Math.round(progress)}%`}
                 {status === 'finalizing' && 'Finalizing Output...'}
@@ -1040,17 +1069,21 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
           )}
 
           {status === 'done' && videoUrl && (
-            <div className="flex gap-4">
+            <div className="flex flex-col xs:flex-row items-center gap-3 md:gap-5 w-full xs:w-auto">
               <a
                 href={videoUrl}
                 download={`gemini_gallery_${aspectRatio.replace(':', '-')}${videoMimeType.includes('mp4') ? '.mp4' : '.webm'}`}
-                className="bg-[#d4af37] hover:bg-[#c4a030] text-black px-8 py-3 rounded-sm font-serif italic text-lg transition-all flex items-center gap-2 shadow-lg"
+                className="group bg-gradient-to-r from-[#d4af37] to-[#c9a227] hover:from-[#e5c04a] hover:to-[#d4af37] text-black px-6 md:px-10 py-3 md:py-3.5 rounded-lg font-serif italic text-base md:text-xl transition-all flex items-center justify-center gap-2 md:gap-3 shadow-[0_4px_20px_0_rgba(212,175,55,0.3)] hover:shadow-[0_6px_30px_0_rgba(212,175,55,0.4)] w-full xs:w-auto"
               >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 md:w-6 md:h-6 group-hover:translate-y-0.5 transition-transform">
+                  <path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z" />
+                  <path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z" />
+                </svg>
                 Download Film
               </a>
               <button
                 onClick={() => setStatus('idle')}
-                className="text-slate-500 hover:text-slate-300 px-4 py-2 text-xs uppercase tracking-widest border border-transparent hover:border-slate-500/50"
+                className="text-slate-500 hover:text-slate-200 px-5 md:px-6 py-2.5 md:py-3 text-xs md:text-sm uppercase tracking-widest border border-slate-600/30 hover:border-slate-400/50 rounded-lg w-full xs:w-auto transition-all hover:bg-slate-800/30"
               >
                 Reset
               </button>
@@ -1066,12 +1099,13 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
 
       {/* Preview Player */}
       {status === 'done' && videoUrl && (
-        <div className="mt-8 space-y-2">
-          <div className="overflow-hidden border border-[#333] bg-black w-full max-w-2xl mx-auto shadow-2xl">
-            <video controls src={videoUrl} className="w-full h-auto block" />
+        <div className="mt-8 md:mt-12 space-y-3 md:space-y-4">
+          <div className="overflow-hidden border border-[#252525] md:border-[#2a2a2a] bg-black w-full max-w-3xl mx-auto shadow-2xl rounded-lg md:rounded-xl ring-1 ring-white/5">
+            <video controls src={videoUrl} className="w-full h-auto block" playsInline />
           </div>
-          <p className="text-slate-500 text-xs max-w-2xl mx-auto text-center">
-            Chrome / Edge 仅支持导出 WebM。如需 MP4：用 Safari 可尝试直接录制，或下载 WebM 后用 ffmpeg 转换：<code className="bg-[#222] px-1 rounded">ffmpeg -i 文件.webm -c copy 文件.mp4</code>
+          <p className="text-slate-500 md:text-slate-400 text-[10px] md:text-xs max-w-2xl mx-auto text-center px-4 md:px-0 leading-relaxed">
+            Chrome / Edge 仅支持导出 WebM。如需 MP4：用 Safari 可尝试直接录制，或下载后用 ffmpeg 转换：
+            <code className="bg-[#1a1a1a] md:bg-[#181818] px-1.5 py-0.5 rounded text-[10px] md:text-xs text-slate-400 md:text-[#d4af37]/60 ml-1">ffmpeg -i 文件.webm -c copy 文件.mp4</code>
           </p>
         </div>
       )}
@@ -1079,8 +1113,9 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       {/* Toast：生成后点击语音/倍速/BGM 时提示 */}
       {toastMessage && (
         <div
-          className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 px-6 py-3 rounded-lg bg-[#222] border border-[#d4af37] text-[#d4af37] text-sm font-medium shadow-lg"
+          className="fixed bottom-4 md:bottom-10 left-1/2 -translate-x-1/2 z-50 px-5 md:px-8 py-2.5 md:py-4 rounded-xl bg-[#151515]/95 md:bg-[#131313]/95 border border-[#d4af37]/50 md:border-[#d4af37]/40 text-[#d4af37] text-xs md:text-sm font-medium shadow-2xl backdrop-blur-md max-w-[90vw] text-center"
           role="alert"
+          style={{ boxShadow: '0 0 40px rgba(212, 175, 55, 0.15)' }}
         >
           {toastMessage}
         </div>

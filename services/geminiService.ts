@@ -509,7 +509,7 @@ export const generateImageFromPrompt = async (
     prompt: `${prompt.trim()} No text, no words, no letters, no writing, no captions in the image.`,
     size,
     response_format: "url",
-    watermark: true,
+    watermark: false,
     seed,
   });
   const headers = {
