@@ -72,77 +72,6 @@ interface AnimationConfig {
   originY: number;
 }
 
-/** Worker 内联代码：图片解码 + 预渲染，在独立线程运行 */
-const PREPROCESS_WORKER_CODE = `
-self.onmessage = async (e) => {
-  const { type, images, dims, maxSourceSize, maxPreSize, maxScale } = e.data;
-  if (type !== 'prerender') return;
-
-  const results = [];
-  for (const { blob, index } of images) {
-    try {
-      const bitmap = await createImageBitmap(blob);
-      const w = bitmap.width;
-      const h = bitmap.height;
-
-      const imgRatio = w / h;
-      const canvasRatio = dims.width / dims.height;
-      let drawW, drawH;
-      if (imgRatio > canvasRatio) {
-        drawH = dims.height;
-        drawW = drawH * imgRatio;
-      } else {
-        drawW = dims.width;
-        drawH = drawW / imgRatio;
-      }
-      let preW = Math.ceil(drawW * maxScale);
-      let preH = Math.ceil(drawH * maxScale);
-      if (preW > maxPreSize || preH > maxPreSize) {
-        const r = Math.min(maxPreSize / preW, maxPreSize / preH);
-        preW = Math.ceil(preW * r);
-        preH = Math.ceil(preH * r);
-      }
-
-      const long = Math.max(w, h);
-      const smallW = long <= maxSourceSize ? w : (w >= h ? maxSourceSize : Math.round((maxSourceSize * w) / h));
-      const smallH = long <= maxSourceSize ? h : (h >= w ? maxSourceSize : Math.round((maxSourceSize * h) / w));
-
-      const tempCanvas = new OffscreenCanvas(smallW, smallH);
-      const tempCtx = tempCanvas.getContext('2d', { alpha: false });
-      tempCtx.drawImage(bitmap, 0, 0, w, h, 0, 0, smallW, smallH);
-
-      const offCanvas = new OffscreenCanvas(preW, preH);
-      const offCtx = offCanvas.getContext('2d', { alpha: false });
-      offCtx.drawImage(tempCanvas, 0, 0, smallW, smallH, 0, 0, preW, preH);
-
-      const resultBitmap = await createImageBitmap(offCanvas);
-      bitmap.close();
-
-      results.push({ index, bitmap: resultBitmap, w: preW, h: preH, success: true });
-    } catch (err) {
-      results.push({ index, w: 0, h: 0, success: false, error: err.message || String(err) });
-    }
-  }
-
-  const bitmaps = results.filter(r => r.success && r.bitmap).map(r => r.bitmap);
-  self.postMessage({ type: 'done', results }, bitmaps);
-};
-`;
-
-/** 创建内联 Worker */
-function createPreprocessWorker(): Worker | null {
-  try {
-    const blob = new Blob([PREPROCESS_WORKER_CODE], { type: 'application/javascript' });
-    const url = URL.createObjectURL(blob);
-    const worker = new Worker(url);
-    // Worker 创建后立即释放 URL
-    URL.revokeObjectURL(url);
-    return worker;
-  } catch (e) {
-    console.warn('Failed to create preprocess worker:', e);
-    return null;
-  }
-}
 
 /** 带绝对时间（秒）的字幕，用于与音频严格对齐 */
 interface TimedSubtitle {
@@ -592,104 +521,64 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       const MAX_SCALE = 1.15;
       const MAX_PRE_SIZE = autoLowSpec ? 1920 : 2560;
 
-      // 使用 Worker 进行图片解码和预渲染（不阻塞主线程）
-      const worker = createPreprocessWorker();
-      let preRendered: { bitmap: ImageBitmap; w: number; h: number }[] = [];
+      // 使用 createImageBitmap 进行图片解码和预渲染（比 Image 对象更快）
+      const preRendered: { bitmap: ImageBitmap; w: number; h: number }[] = [];
 
-      if (worker) {
-        // Worker 可用：在独立线程完成解码和预渲染
-        preRendered = await new Promise<{ bitmap: ImageBitmap; w: number; h: number }[]>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            worker.terminate();
-            reject(new Error('Worker timeout'));
-          }, 60000); // 60s 超时
+      for (const { blob, index } of validBlobs) {
+        try {
+          // createImageBitmap 比 new Image() 更快，异步解码不阻塞
+          const bitmap = await createImageBitmap(blob);
+          const w = bitmap.width;
+          const h = bitmap.height;
+          const imgRatio = w / h;
+          const canvasRatio = dims.width / dims.height;
+          let drawW: number, drawH: number;
+          if (imgRatio > canvasRatio) {
+            drawH = dims.height;
+            drawW = drawH * imgRatio;
+          } else {
+            drawW = dims.width;
+            drawH = drawW / imgRatio;
+          }
+          let preW = Math.ceil(drawW * MAX_SCALE);
+          let preH = Math.ceil(drawH * MAX_SCALE);
+          if (preW > MAX_PRE_SIZE || preH > MAX_PRE_SIZE) {
+            const r = Math.min(MAX_PRE_SIZE / preW, MAX_PRE_SIZE / preH);
+            preW = Math.ceil(preW * r);
+            preH = Math.ceil(preH * r);
+          }
 
-          worker.onmessage = (e) => {
-            clearTimeout(timeout);
-            worker.terminate();
-            const { results } = e.data;
-            const sorted = results
-              .filter((r: any) => r.success && r.bitmap)
-              .sort((a: any, b: any) => a.index - b.index)
-              .map((r: any) => ({ bitmap: r.bitmap, w: r.w, h: r.h }));
-            resolve(sorted);
-          };
-
-          worker.onerror = (e) => {
-            clearTimeout(timeout);
-            worker.terminate();
-            reject(new Error('Worker error: ' + e.message));
-          };
-
-          // 发送 blob 给 Worker
-          worker.postMessage({
-            type: 'prerender',
-            images: validBlobs.map((r) => ({ blob: r.blob, index: r.index })),
-            dims,
-            maxSourceSize: MAX_SOURCE_SIZE,
-            maxPreSize: MAX_PRE_SIZE,
-            maxScale: MAX_SCALE,
-          });
-        });
-      } else {
-        // Worker 不可用：回退到主线程处理（兼容旧浏览器）
-        console.warn('Worker unavailable, falling back to main thread prerendering');
-        for (const { blob, index } of validBlobs) {
-          try {
-            const bitmap = await createImageBitmap(blob);
-            const w = bitmap.width;
-            const h = bitmap.height;
-            const imgRatio = w / h;
-            const canvasRatio = dims.width / dims.height;
-            let drawW: number, drawH: number;
-            if (imgRatio > canvasRatio) {
-              drawH = dims.height;
-              drawW = drawH * imgRatio;
-            } else {
-              drawW = dims.width;
-              drawH = drawW / imgRatio;
-            }
-            let preW = Math.ceil(drawW * MAX_SCALE);
-            let preH = Math.ceil(drawH * MAX_SCALE);
-            if (preW > MAX_PRE_SIZE || preH > MAX_PRE_SIZE) {
-              const r = Math.min(MAX_PRE_SIZE / preW, MAX_PRE_SIZE / preH);
-              preW = Math.ceil(preW * r);
-              preH = Math.ceil(preH * r);
-            }
-            // 用 OffscreenCanvas 如果可用
-            let usedOriginalBitmap = false;
-            if (typeof OffscreenCanvas !== 'undefined') {
-              const long = Math.max(w, h);
-              const smallW = long <= MAX_SOURCE_SIZE ? w : (w >= h ? MAX_SOURCE_SIZE : Math.round((MAX_SOURCE_SIZE * w) / h));
-              const smallH = long <= MAX_SOURCE_SIZE ? h : (h >= w ? MAX_SOURCE_SIZE : Math.round((MAX_SOURCE_SIZE * h) / w));
-              const tempCanvas = new OffscreenCanvas(smallW, smallH);
-              const tempCtx = tempCanvas.getContext('2d', { alpha: false });
-              if (tempCtx) {
-                tempCtx.drawImage(bitmap, 0, 0, w, h, 0, 0, smallW, smallH);
-                const offCanvas = new OffscreenCanvas(preW, preH);
-                const offCtx = offCanvas.getContext('2d', { alpha: false });
-                if (offCtx) {
-                  offCtx.drawImage(tempCanvas, 0, 0, smallW, smallH, 0, 0, preW, preH);
-                  const resultBitmap = await createImageBitmap(offCanvas);
-                  preRendered.push({ bitmap: resultBitmap, w: preW, h: preH });
-                  bitmap.close?.(); // 成功创建新 bitmap，释放原始的
-                } else {
-                  usedOriginalBitmap = true;
-                }
+          // 用 OffscreenCanvas 进行两步缩放预渲染
+          if (typeof OffscreenCanvas !== 'undefined') {
+            const long = Math.max(w, h);
+            const smallW = long <= MAX_SOURCE_SIZE ? w : (w >= h ? MAX_SOURCE_SIZE : Math.round((MAX_SOURCE_SIZE * w) / h));
+            const smallH = long <= MAX_SOURCE_SIZE ? h : (h >= w ? MAX_SOURCE_SIZE : Math.round((MAX_SOURCE_SIZE * h) / w));
+            const tempCanvas = new OffscreenCanvas(smallW, smallH);
+            const tempCtx = tempCanvas.getContext('2d', { alpha: false });
+            if (tempCtx) {
+              tempCtx.drawImage(bitmap, 0, 0, w, h, 0, 0, smallW, smallH);
+              const offCanvas = new OffscreenCanvas(preW, preH);
+              const offCtx = offCanvas.getContext('2d', { alpha: false });
+              if (offCtx) {
+                offCtx.drawImage(tempCanvas, 0, 0, smallW, smallH, 0, 0, preW, preH);
+                const resultBitmap = await createImageBitmap(offCanvas);
+                preRendered.push({ bitmap: resultBitmap, w: preW, h: preH });
+                bitmap.close?.();
               } else {
-                usedOriginalBitmap = true;
+                // OffscreenCanvas context 失败，直接用原始 bitmap
+                preRendered.push({ bitmap, w, h });
               }
             } else {
-              usedOriginalBitmap = true;
-            }
-            if (usedOriginalBitmap) {
-              // 回退：直接用原始 bitmap（不能 close）
               preRendered.push({ bitmap, w, h });
             }
-            await new Promise<void>(r => requestAnimationFrame(() => r()));
-          } catch (e) {
-            console.warn('Fallback prerender failed for image', index, e);
+          } else {
+            // 不支持 OffscreenCanvas，直接用原始 bitmap
+            preRendered.push({ bitmap, w, h });
           }
+          // 让出主线程，避免长时间阻塞
+          await new Promise<void>(r => requestAnimationFrame(() => r()));
+        } catch (e) {
+          console.warn('Image prerender failed for index', index, e);
         }
       }
 
