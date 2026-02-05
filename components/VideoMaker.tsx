@@ -516,10 +516,12 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
 
       // 流畅优先（低配勾选/多图自动降级）：预渲染与码率降低
       const imgCount = validBlobs.length;
-      const autoLowSpec = lowSpecMode || imgCount >= 8;
-      const MAX_SOURCE_SIZE = autoLowSpec ? 960 : 1280;
+      // 多图分级降级：6张起中度降级，8张起重度降级
+      const midSpec = imgCount >= 6;
+      const heavySpec = lowSpecMode || imgCount >= 8;
+      const MAX_SOURCE_SIZE = heavySpec ? 768 : (midSpec ? 960 : 1280);
       const MAX_SCALE = 1.15;
-      const MAX_PRE_SIZE = autoLowSpec ? 1920 : 2560;
+      const MAX_PRE_SIZE = heavySpec ? 1536 : (midSpec ? 1920 : 2560);
 
       // 使用 createImageBitmap 进行图片解码和预渲染（比 Image 对象更快）
       const preRendered: { bitmap: ImageBitmap; w: number; h: number }[] = [];
@@ -600,7 +602,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       ctx.textBaseline = 'middle';
       const precomputedSubtitleLines: string[][] = timedSubtitles.map(s => wrapText(ctx, s.text.trim(), subtitleMaxWidth));
 
-      const canvasStream = canvas.captureStream(autoLowSpec ? 24 : 30);
+      const canvasStream = canvas.captureStream(midSpec ? 24 : 30);
       stream = new MediaStream([
         ...canvasStream.getVideoTracks(),
         ...dest.stream.getAudioTracks()
@@ -610,7 +612,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
 
       mediaRecorder = new MediaRecorder(stream, {
         mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'video/webm',
-        videoBitsPerSecond: autoLowSpec ? 3000000 : 4000000
+        videoBitsPerSecond: heavySpec ? 2500000 : (midSpec ? 3000000 : 4000000)
       });
 
       const chunks: Blob[] = [];
@@ -653,7 +655,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       if (musicSource) musicSource.start(startTime);
 
       // 流畅优先或 4 张以上用 24fps；requestAnimationFrame 按实际刷新率跑，不堆积
-      const RENDER_FPS = autoLowSpec || preRendered.length >= 4 ? 24 : 30;
+      const RENDER_FPS = midSpec || preRendered.length >= 4 ? 24 : 30;
       const renderLoop = () => {
         const currentTime = audioCtx!.currentTime;
         const elapsed = currentTime - startTime;
