@@ -72,6 +72,78 @@ interface AnimationConfig {
   originY: number;
 }
 
+/** Worker 内联代码：图片解码 + 预渲染，在独立线程运行 */
+const PREPROCESS_WORKER_CODE = `
+self.onmessage = async (e) => {
+  const { type, images, dims, maxSourceSize, maxPreSize, maxScale } = e.data;
+  if (type !== 'prerender') return;
+
+  const results = [];
+  for (const { blob, index } of images) {
+    try {
+      const bitmap = await createImageBitmap(blob);
+      const w = bitmap.width;
+      const h = bitmap.height;
+
+      const imgRatio = w / h;
+      const canvasRatio = dims.width / dims.height;
+      let drawW, drawH;
+      if (imgRatio > canvasRatio) {
+        drawH = dims.height;
+        drawW = drawH * imgRatio;
+      } else {
+        drawW = dims.width;
+        drawH = drawW / imgRatio;
+      }
+      let preW = Math.ceil(drawW * maxScale);
+      let preH = Math.ceil(drawH * maxScale);
+      if (preW > maxPreSize || preH > maxPreSize) {
+        const r = Math.min(maxPreSize / preW, maxPreSize / preH);
+        preW = Math.ceil(preW * r);
+        preH = Math.ceil(preH * r);
+      }
+
+      const long = Math.max(w, h);
+      const smallW = long <= maxSourceSize ? w : (w >= h ? maxSourceSize : Math.round((maxSourceSize * w) / h));
+      const smallH = long <= maxSourceSize ? h : (h >= w ? maxSourceSize : Math.round((maxSourceSize * h) / w));
+
+      const tempCanvas = new OffscreenCanvas(smallW, smallH);
+      const tempCtx = tempCanvas.getContext('2d', { alpha: false });
+      tempCtx.drawImage(bitmap, 0, 0, w, h, 0, 0, smallW, smallH);
+
+      const offCanvas = new OffscreenCanvas(preW, preH);
+      const offCtx = offCanvas.getContext('2d', { alpha: false });
+      offCtx.drawImage(tempCanvas, 0, 0, smallW, smallH, 0, 0, preW, preH);
+
+      const resultBitmap = await createImageBitmap(offCanvas);
+      bitmap.close();
+
+      results.push({ index, bitmap: resultBitmap, w: preW, h: preH, success: true });
+    } catch (err) {
+      results.push({ index, w: 0, h: 0, success: false, error: err.message || String(err) });
+    }
+  }
+
+  const bitmaps = results.filter(r => r.success && r.bitmap).map(r => r.bitmap);
+  self.postMessage({ type: 'done', results }, bitmaps);
+};
+`;
+
+/** 创建内联 Worker */
+function createPreprocessWorker(): Worker | null {
+  try {
+    const blob = new Blob([PREPROCESS_WORKER_CODE], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    const worker = new Worker(url);
+    // Worker 创建后立即释放 URL
+    URL.revokeObjectURL(url);
+    return worker;
+  } catch (e) {
+    console.warn('Failed to create preprocess worker:', e);
+    return null;
+  }
+}
+
 /** 带绝对时间（秒）的字幕，用于与音频严格对齐 */
 interface TimedSubtitle {
   text: string;
@@ -404,80 +476,35 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       await audioCtx.resume(); // CRITICAL: Ensure context is running
 
-      // 3. Load Images：逐张加载+解码并在每张后让出主线程，避免 4 张同时 decode 造成长时间卡顿
-      const loadedImages: HTMLImageElement[] = [];
-      for (const item of validImages) {
-        const img = await new Promise<HTMLImageElement>((resolve) => {
-          const im = new Image();
-          im.crossOrigin = "anonymous";
-          const safeUrl = item.imageUrl || "";
-
-          // 先直连再代理：Volces 签名图直连常可成功，代理易被拦截或服务端拒绝
-          const fetchImageBlob = async (url: string) => {
-            const useBlob = (blob: Blob) => {
-              const blobUrl = URL.createObjectURL(blob);
-              im.src = blobUrl;
-            };
-            try {
-              // 1) 优先直连（Volces/TOS 签名 URL 在浏览器侧常可成功，避免 /api/proxy 失败）
-              const direct = await fetch(url, { mode: 'cors' });
-              if (direct.ok) {
-                const blob = await direct.blob();
-                if (blob.type.startsWith('image/')) {
-                  useBlob(blob);
-                  return;
-                }
-              }
-            } catch (_) {}
-            try {
-              // 2) 直连失败时走同源代理
-              const proxyUrl = getProxyUrl(url);
-              const res = await fetch(proxyUrl);
-              if (!res.ok) throw new Error(`Proxy: ${res.status}`);
-              const blob = await res.blob();
-              useBlob(blob);
-            } catch (e) {
-              console.warn("Proxy image load failed, trying direct img src:", e);
-              im.src = url;
-            }
-          };
-
-          im.onload = () => resolve(im);
-          im.onerror = () => {
-            console.error("Failed to load image for video:", safeUrl);
-            im.width = 0;
-            resolve(im);
-          };
-
-          if (safeUrl) fetchImageBlob(safeUrl);
-          else resolve(im);
-        });
-        if (typeof img.decode === 'function') {
-          await img.decode().catch(() => { });
-        }
-        loadedImages.push(img);
-        await new Promise<void>(r => requestAnimationFrame(() => r()));
-      }
-
-      // 过滤无效图，并排除会污染 canvas 的跨域图（避免第二、三张时 drawImage 抛错导致画面卡死）
-      const canDrawImage = (img: HTMLImageElement): boolean => {
-        if (!img.naturalWidth && !img.width) return false;
+      // 3. Load Images：并行 fetch 所有图片的 blob
+      const fetchImageBlob = async (url: string): Promise<Blob | null> => {
         try {
-          const off = document.createElement('canvas');
-          off.width = 1;
-          off.height = 1;
-          const offCtx = off.getContext('2d');
-          if (!offCtx) return true;
-          offCtx.drawImage(img, 0, 0, 1, 1);
-          offCtx.getImageData(0, 0, 1, 1);
-          return true;
-        } catch {
-          return false;
-        }
+          // 1) 优先直连
+          const direct = await fetch(url, { mode: 'cors' });
+          if (direct.ok) {
+            const blob = await direct.blob();
+            if (blob.type.startsWith('image/')) return blob;
+          }
+        } catch (_) {}
+        try {
+          // 2) 直连失败走代理
+          const proxyUrl = getProxyUrl(url);
+          const res = await fetch(proxyUrl);
+          if (res.ok) return await res.blob();
+        } catch (_) {}
+        return null;
       };
-      const usefulImages = loadedImages.filter(canDrawImage);
-      if (usefulImages.length === 0) {
-        throw new Error("No valid images available. Canvas tainted or load failed.");
+
+      // 并行 fetch 所有图片
+      const blobResults = await Promise.all(
+        validImages.map(async (item, idx) => {
+          const blob = item.imageUrl ? await fetchImageBlob(item.imageUrl) : null;
+          return { blob, index: idx };
+        })
+      );
+      const validBlobs = blobResults.filter((r): r is { blob: Blob; index: number } => r.blob !== null);
+      if (validBlobs.length === 0) {
+        throw new Error("No valid images available. All image loads failed.");
       }
 
       // 4. Prepare Voice Buffer（已按句拼接，含句间静音）
@@ -537,7 +564,6 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       const OUTRO_PADDING = 1.5;
       const effectiveVoiceDuration = voiceAudioBuffer.duration / speed;
       const totalDuration = INTRO_PADDING + effectiveVoiceDuration + OUTRO_PADDING;
-      const imageDisplayDuration = totalDuration / usefulImages.length;
 
       // 字幕：用每句实际合成时长 + 句间静音计算起止时间（与音频严格对齐）
       const voiceStart = INTRO_PADDING;
@@ -559,58 +585,113 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       canvas.width = dims.width;
       canvas.height = dims.height;
 
-      const animConfigs = usefulImages.map((_, i) => generateAnimationConfig(i));
+      const animConfigs = validBlobs.map((_, i) => generateAnimationConfig(i));
       // 流畅优先（低配勾选/多图自动降级）：预渲染与码率降低
-      const imgCount = usefulImages.length;
+      const imgCount = validBlobs.length;
       const autoLowSpec = lowSpecMode || imgCount >= 8;
       const MAX_SOURCE_SIZE = autoLowSpec ? 960 : 1280;
       const MAX_SCALE = 1.15;
       const MAX_PRE_SIZE = autoLowSpec ? 1920 : 2560;
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = MAX_SOURCE_SIZE;
-      tempCanvas.height = MAX_SOURCE_SIZE;
-      const tempCtx = tempCanvas.getContext('2d', { alpha: false, willReadFrequently: false });
-      const preRendered: { canvas: HTMLCanvasElement; w: number; h: number }[] = [];
-      for (let i = 0; i < usefulImages.length; i++) {
-        const img = usefulImages[i];
-        const w = img.naturalWidth || img.width || 1;
-        const h = img.naturalHeight || img.height || 1;
-        const imgRatio = w / h;
-        const canvasRatio = dims.width / dims.height;
-        let drawW: number, drawH: number;
-        if (imgRatio > canvasRatio) {
-          drawH = dims.height;
-          drawW = drawH * imgRatio;
-        } else {
-          drawW = dims.width;
-          drawH = drawW / imgRatio;
+
+      // 使用 Worker 进行图片解码和预渲染（不阻塞主线程）
+      const worker = createPreprocessWorker();
+      let preRendered: { bitmap: ImageBitmap; w: number; h: number }[] = [];
+
+      if (worker) {
+        // Worker 可用：在独立线程完成解码和预渲染
+        preRendered = await new Promise<{ bitmap: ImageBitmap; w: number; h: number }[]>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            worker.terminate();
+            reject(new Error('Worker timeout'));
+          }, 60000); // 60s 超时
+
+          worker.onmessage = (e) => {
+            clearTimeout(timeout);
+            worker.terminate();
+            const { results } = e.data;
+            const sorted = results
+              .filter((r: any) => r.success && r.bitmap)
+              .sort((a: any, b: any) => a.index - b.index)
+              .map((r: any) => ({ bitmap: r.bitmap, w: r.w, h: r.h }));
+            resolve(sorted);
+          };
+
+          worker.onerror = (e) => {
+            clearTimeout(timeout);
+            worker.terminate();
+            reject(new Error('Worker error: ' + e.message));
+          };
+
+          // 发送 blob 给 Worker
+          worker.postMessage({
+            type: 'prerender',
+            images: validBlobs.map((r) => ({ blob: r.blob, index: r.index })),
+            dims,
+            maxSourceSize: MAX_SOURCE_SIZE,
+            maxPreSize: MAX_PRE_SIZE,
+            maxScale: MAX_SCALE,
+          });
+        });
+      } else {
+        // Worker 不可用：回退到主线程处理（兼容旧浏览器）
+        console.warn('Worker unavailable, falling back to main thread prerendering');
+        for (const { blob, index } of validBlobs) {
+          try {
+            const bitmap = await createImageBitmap(blob);
+            const w = bitmap.width;
+            const h = bitmap.height;
+            const imgRatio = w / h;
+            const canvasRatio = dims.width / dims.height;
+            let drawW: number, drawH: number;
+            if (imgRatio > canvasRatio) {
+              drawH = dims.height;
+              drawW = drawH * imgRatio;
+            } else {
+              drawW = dims.width;
+              drawH = drawW / imgRatio;
+            }
+            let preW = Math.ceil(drawW * MAX_SCALE);
+            let preH = Math.ceil(drawH * MAX_SCALE);
+            if (preW > MAX_PRE_SIZE || preH > MAX_PRE_SIZE) {
+              const r = Math.min(MAX_PRE_SIZE / preW, MAX_PRE_SIZE / preH);
+              preW = Math.ceil(preW * r);
+              preH = Math.ceil(preH * r);
+            }
+            // 用 OffscreenCanvas 如果可用
+            if (typeof OffscreenCanvas !== 'undefined') {
+              const long = Math.max(w, h);
+              const smallW = long <= MAX_SOURCE_SIZE ? w : (w >= h ? MAX_SOURCE_SIZE : Math.round((MAX_SOURCE_SIZE * w) / h));
+              const smallH = long <= MAX_SOURCE_SIZE ? h : (h >= w ? MAX_SOURCE_SIZE : Math.round((MAX_SOURCE_SIZE * h) / w));
+              const tempCanvas = new OffscreenCanvas(smallW, smallH);
+              const tempCtx = tempCanvas.getContext('2d', { alpha: false });
+              if (tempCtx) {
+                tempCtx.drawImage(bitmap, 0, 0, w, h, 0, 0, smallW, smallH);
+                const offCanvas = new OffscreenCanvas(preW, preH);
+                const offCtx = offCanvas.getContext('2d', { alpha: false });
+                if (offCtx) {
+                  offCtx.drawImage(tempCanvas, 0, 0, smallW, smallH, 0, 0, preW, preH);
+                  const resultBitmap = await createImageBitmap(offCanvas);
+                  preRendered.push({ bitmap: resultBitmap, w: preW, h: preH });
+                }
+              }
+            } else {
+              // 最终回退：直接用原始 bitmap
+              preRendered.push({ bitmap, w, h });
+            }
+            bitmap.close?.();
+            await new Promise<void>(r => requestAnimationFrame(() => r()));
+          } catch (e) {
+            console.warn('Fallback prerender failed for image', index, e);
+          }
         }
-        let preW = Math.ceil(drawW * MAX_SCALE);
-        let preH = Math.ceil(drawH * MAX_SCALE);
-        if (preW > MAX_PRE_SIZE || preH > MAX_PRE_SIZE) {
-          const r = Math.min(MAX_PRE_SIZE / preW, MAX_PRE_SIZE / preH);
-          preW = Math.ceil(preW * r);
-          preH = Math.ceil(preH * r);
-        }
-        const off = document.createElement('canvas');
-        off.width = preW;
-        off.height = preH;
-        const offCtx = off.getContext('2d', { alpha: false, willReadFrequently: false });
-        if (offCtx && tempCtx) {
-          const long = Math.max(w, h);
-          const smallW = long <= MAX_SOURCE_SIZE ? w : (w >= h ? MAX_SOURCE_SIZE : Math.round((MAX_SOURCE_SIZE * w) / h));
-          const smallH = long <= MAX_SOURCE_SIZE ? h : (h >= w ? MAX_SOURCE_SIZE : Math.round((MAX_SOURCE_SIZE * h) / w));
-          tempCanvas.width = smallW;
-          tempCanvas.height = smallH;
-          tempCtx.drawImage(img, 0, 0, w, h, 0, 0, smallW, smallH);
-          await new Promise<void>(r => requestAnimationFrame(() => r()));
-          offCtx.drawImage(tempCanvas, 0, 0, smallW, smallH, 0, 0, preW, preH);
-          preRendered.push({ canvas: off, w: preW, h: preH });
-        } else {
-          preRendered.push({ canvas: off, w: preW, h: preH });
-        }
-        await new Promise<void>(r => requestAnimationFrame(() => r()));
       }
+
+      if (preRendered.length === 0) {
+        throw new Error("No valid images available after preprocessing.");
+      }
+
+      // 每张图片的显示时长（基于预渲染成功的图片数量）
+      const imageDisplayDuration = totalDuration / preRendered.length;
 
       // 预计算字幕换行，避免每帧 measureText 造成越往后越卡
       const subtitleFontSize = Math.floor(dims.height * 0.042);
@@ -673,13 +754,13 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       if (musicSource) musicSource.start(startTime);
 
       // 流畅优先或 4 张以上用 24fps；requestAnimationFrame 按实际刷新率跑，不堆积
-      const RENDER_FPS = autoLowSpec || usefulImages.length >= 4 ? 24 : 30;
+      const RENDER_FPS = autoLowSpec || preRendered.length >= 4 ? 24 : 30;
       const renderLoop = () => {
         const currentTime = audioCtx!.currentTime;
         const elapsed = currentTime - startTime;
 
         if (elapsed >= totalDuration) {
-          const lastIdx = usefulImages.length - 1;
+          const lastIdx = preRendered.length - 1;
           ctx.fillStyle = '#000';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
           const pre = preRendered[lastIdx];
@@ -692,9 +773,11 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
             const x = (canvas.width * config.panXEnd) - (scaledW / 2);
             const y = (canvas.height * config.panYEnd) - (scaledH / 2);
             try {
-              ctx.drawImage(pre.canvas, 0, 0, pre.w, pre.h, x, y, scaledW, scaledH);
+              ctx.drawImage(pre.bitmap, 0, 0, pre.w, pre.h, x, y, scaledW, scaledH);
             } catch (_) { }
           }
+          // 释放 ImageBitmap 资源
+          preRendered.forEach(p => p.bitmap.close?.());
           setStatus('finalizing');
           if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
           if (typeof renderTimerId !== 'undefined') cancelAnimationFrame(renderTimerId);
@@ -703,7 +786,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
 
         try {
           const rawSlideIndex = elapsed / imageDisplayDuration;
-          const slideIndex = Math.min(usefulImages.length - 1, Math.max(0, Math.floor(rawSlideIndex)));
+          const slideIndex = Math.min(preRendered.length - 1, Math.max(0, Math.floor(rawSlideIndex)));
           const slideStartTime = slideIndex * imageDisplayDuration;
           const slideLocalTime = elapsed - slideStartTime;
           const p = Math.max(0, Math.min(1, slideLocalTime / imageDisplayDuration));
@@ -724,7 +807,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
             const x = (canvas.width * panX) - (scaledW / 2);
             const y = (canvas.height * panY) - (scaledH / 2);
             try {
-              ctx.drawImage(pre.canvas, 0, 0, pre.w, pre.h, x, y, scaledW, scaledH);
+              ctx.drawImage(pre.bitmap, 0, 0, pre.w, pre.h, x, y, scaledW, scaledH);
             } catch {
               ctx.fillStyle = '#1a1a1a';
               ctx.fillRect(0, 0, canvas.width, canvas.height);
