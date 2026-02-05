@@ -585,7 +585,6 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       canvas.width = dims.width;
       canvas.height = dims.height;
 
-      const animConfigs = validBlobs.map((_, i) => generateAnimationConfig(i));
       // 流畅优先（低配勾选/多图自动降级）：预渲染与码率降低
       const imgCount = validBlobs.length;
       const autoLowSpec = lowSpecMode || imgCount >= 8;
@@ -658,6 +657,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
               preH = Math.ceil(preH * r);
             }
             // 用 OffscreenCanvas 如果可用
+            let usedOriginalBitmap = false;
             if (typeof OffscreenCanvas !== 'undefined') {
               const long = Math.max(w, h);
               const smallW = long <= MAX_SOURCE_SIZE ? w : (w >= h ? MAX_SOURCE_SIZE : Math.round((MAX_SOURCE_SIZE * w) / h));
@@ -672,13 +672,20 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
                   offCtx.drawImage(tempCanvas, 0, 0, smallW, smallH, 0, 0, preW, preH);
                   const resultBitmap = await createImageBitmap(offCanvas);
                   preRendered.push({ bitmap: resultBitmap, w: preW, h: preH });
+                  bitmap.close?.(); // 成功创建新 bitmap，释放原始的
+                } else {
+                  usedOriginalBitmap = true;
                 }
+              } else {
+                usedOriginalBitmap = true;
               }
             } else {
-              // 最终回退：直接用原始 bitmap
+              usedOriginalBitmap = true;
+            }
+            if (usedOriginalBitmap) {
+              // 回退：直接用原始 bitmap（不能 close）
               preRendered.push({ bitmap, w, h });
             }
-            bitmap.close?.();
             await new Promise<void>(r => requestAnimationFrame(() => r()));
           } catch (e) {
             console.warn('Fallback prerender failed for image', index, e);
@@ -689,6 +696,9 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       if (preRendered.length === 0) {
         throw new Error("No valid images available after preprocessing.");
       }
+
+      // 动画配置：基于预渲染成功的图片数量
+      const animConfigs = preRendered.map((_, i) => generateAnimationConfig(i));
 
       // 每张图片的显示时长（基于预渲染成功的图片数量）
       const imageDisplayDuration = totalDuration / preRendered.length;
