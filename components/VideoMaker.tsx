@@ -1083,7 +1083,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       {status === 'done' && videoUrl && (
         <div className="mt-8 md:mt-12 space-y-3 md:space-y-4">
           <div className="overflow-hidden border border-[#252525] md:border-[#2a2a2a] bg-black w-full max-w-3xl mx-auto shadow-2xl rounded-lg md:rounded-xl ring-1 ring-white/5">
-            <video controls src={videoUrl} className="w-full h-auto block" playsInline />
+            <video controls src={videoUrl} className="w-full h-auto block" playsInline style={{ imageRendering: 'auto', transform: 'translateZ(0)' }} />
           </div>
           <p className="text-slate-500 md:text-slate-400 text-[10px] md:text-xs max-w-2xl mx-auto text-center px-4 md:px-0 leading-relaxed">
             Chrome / Edge 仅支持导出 WebM。如需 MP4：用 Safari 可尝试直接录制，或下载后用 ffmpeg 转换：
