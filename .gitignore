@@ -11,6 +11,14 @@ node_modules
 dist
 dist-ssr
 *.local
+electron/secrets.enc
+electron/icon.png
+
+# Build / Release artifacts
+build/
+release/
+ffmpeg-bin/
+.npm-cache/
 
 # Editor directories and files
 .vscode/*

@@ -9,8 +9,12 @@ const getAiClient = () => {
   return new GoogleGenAI({ apiKey: apiKey });
 };
 
-/** 豆包/火山 API Key（图像生成、对话），Vite 需在 .env 配置 VITE_DOUBAO_API_KEY */
+/** 豆包/火山 API Key（图像生成、对话）。桌面版优先使用内置加密配置 __BUILTIN_ENV__ */
 function getDoubaoApiKey(): string {
+  const builtin = typeof window !== "undefined" && (window as any).__BUILTIN_ENV__;
+  if (builtin && typeof builtin.VITE_DOUBAO_API_KEY === "string") {
+    return (builtin.VITE_DOUBAO_API_KEY as string).trim();
+  }
   const env = typeof import.meta !== "undefined" ? (import.meta as any).env : {};
   return (env.VITE_DOUBAO_API_KEY || "").trim();
 }
@@ -287,14 +291,17 @@ const generatePromptsInOneCall = async (
   const originalEndpoint = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
   const endpoint = getProxyUrl(originalEndpoint + "?_t=" + Date.now());
 
-  const systemPrompt = `You are a Film Concept Artist. Output exactly ${count} English image prompts for a video, one per line.
+  const systemPrompt = `You are a Film Concept Artist.
+
+OUTPUT FORMAT (strictly follow):
+Line 1: TITLE: followed by a short Chinese title (5-6 characters) that summarizes the core theme/story of the text. Example: "TITLE: 海伦的光芒" or "TITLE: 春日校园行"
+Lines 2 to ${count + 1}: Exactly ${count} English image prompts for a video, one per line.
 
 CRITICAL - COVER ALL EXAMPLES: If the text mentions multiple distinct people or examples (e.g., Lincoln AND Helen Keller), you MUST depict each in at least one keyframe. Do NOT omit any named person or major example. Distribute keyframes across the full narrative.
 
 CRITICAL - NON-NARRATIVE = NO PEOPLE: If the text is informational, explanatory, or non-story (e.g., science, geography, nature, concepts, how-things-work), describe ONLY scenery, environment, objects, or abstract visuals. Do NOT include any people, characters, or human figures.
 
-Rules: Faithful to the source. Style: "${style}". Camera: "${viewDistance}". Add "8k, cinematic lighting, masterpiece". No text in images. Same world/era where relevant. Each prompt 50-80 words.
-Output: exactly ${count} lines, one prompt per line, no numbering.`;
+Rules: Faithful to the source. Style: "${style}". Camera: "${viewDistance}". Add "8k, cinematic lighting, masterpiece". No text in images. Same world/era where relevant. Each prompt 50-80 words.`;
 
   const userMessage = `Generate ${count} keyframe prompts for:\n\n${userInput.trim()}`;
 
@@ -328,8 +335,19 @@ Output: exactly ${count} lines, one prompt per line, no numbering.`;
     const content = data.choices?.[0]?.message?.content;
     if (!content || typeof content !== "string") throw new Error("Empty response");
 
-    const lines = content
-      .split(/\n+/)
+    const allLines = content.split(/\n+/).map((s: string) => s.trim()).filter(Boolean);
+
+    // 提取标题（第一行 TITLE: xxx）
+    let extractedTitle = '';
+    const titleLine = allLines.find(l => /^TITLE\s*[:：]/i.test(l));
+    if (titleLine) {
+      extractedTitle = titleLine.replace(/^TITLE\s*[:：]\s*/i, '').trim();
+    }
+    // 缓存到模块级变量，供外部获取
+    _lastGeneratedTitle = extractedTitle;
+
+    const lines = allLines
+      .filter((s: string) => !/^TITLE\s*[:：]/i.test(s)) // 排除标题行
       .map((s: string) => s.replace(/^\s*[\d\.\-\*]+\s*/, "").trim())
       .filter((s: string) => s.length > 20);
 
@@ -397,6 +415,13 @@ const generatePromptsParallel = async (
   return Promise.all(promises);
 };
 
+/** 缓存最近一次 prompt 生成时提取的短标题 */
+let _lastGeneratedTitle = '';
+/** 获取最近一次 generateCreativePrompts 调用时大模型返回的短标题 */
+export function getLastGeneratedTitle(): string {
+  return _lastGeneratedTitle;
+}
+
 /**
  * Generates detailed image prompts. 优先一次调用（更快），失败时回退到并行。
  */
@@ -407,6 +432,7 @@ export const generateCreativePrompts = async (
   viewDistance: string = 'Default',
   reasoningEffort: ReasoningEffort = 'minimal'
 ): Promise<{ prompt: string; sceneText: string }[]> => {
+  _lastGeneratedTitle = ''; // 重置
   const oneCall = await generatePromptsInOneCall(userInput, style, count, viewDistance, reasoningEffort);
   if (oneCall.length >= count) return oneCall;
   return generatePromptsParallel(userInput, style, count, viewDistance, reasoningEffort);
@@ -534,8 +560,9 @@ export const generateImageFromPrompt = async (
     if (fallback) endpoints.push(fallback + encodeURIComponent(originalEndpoint));
     
     if (attempt > 0) {
-      // 指数退避：第1次重试等3秒，第2次重试等6秒
-      const delay = 3000 * attempt;
+      // 桌面版同源代理更快，退避时间缩短
+      const baseMs = typeof window !== 'undefined' && (window as any).electronAPI?.isDesktop ? 1500 : 3000;
+      const delay = baseMs * attempt;
       console.log(`[Image Gen] Retry ${attempt}/3 after ${delay}ms...`);
       await new Promise(r => setTimeout(r, delay));
     }
@@ -671,7 +698,7 @@ export const generateImageFromPrompt = async (
   throw new Error(`图片生成失败。\n\n${hint}${lastErr ? "\n\n最后错误: " + lastErr : ""}`);
 };
 
-export { generateSpeechDoubao } from './doubaoTtsService';
+export { generateSpeechDoubao, generateSpeechBatch } from './doubaoTtsService';
 import type { DoubaoEmotionOptions } from './doubaoTtsService';
 
 /**

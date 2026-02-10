@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>听说在线-灵感画廊</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: #050505;
+      color: #e8e8e8;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      position: relative;
+    }
+    /* 艺术感渐变层 */
+    body::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: 
+        radial-gradient(ellipse 80% 50% at 50% 30%, rgba(212,175,55,0.04) 0%, transparent 50%),
+        radial-gradient(ellipse 60% 40% at 80% 80%, rgba(180,140,80,0.03) 0%, transparent 45%),
+        linear-gradient(180deg, rgba(255,255,255,0.02) 0%, transparent 30%, transparent 70%, rgba(0,0,0,0.3) 100%);
+      pointer-events: none;
+    }
+    /* 细线网格 - 画廊感 */
+    body::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+      background-size: 48px 48px;
+      opacity: 0.6;
+      pointer-events: none;
+    }
+    .brand {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      padding: 0 48px;
+    }
+    .brand-icon {
+      width: 88px;
+      height: 88px;
+      margin: 0 auto 36px;
+      border-radius: 22px;
+      overflow: hidden;
+      background: #080808;
+      box-shadow: 
+        0 0 0 1px rgba(212,175,55,0.08),
+        0 24px 48px -12px rgba(0,0,0,0.6);
+    }
+    .brand-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .brand-title {
+      font-size: 36px;
+      font-weight: 400;
+      color: #f5f5f5;
+      letter-spacing: 0.2em;
+      margin-bottom: 12px;
+      font-style: italic;
+    }
+    .brand-sub {
+      font-size: 11px;
+      color: rgba(212,175,55,0.75);
+      letter-spacing: 0.4em;
+      text-transform: uppercase;
+      font-weight: 400;
+      word-spacing: 0.3em;
+    }
+    .divider {
+      position: relative;
+      z-index: 1;
+      width: 64px;
+      height: 1px;
+      margin: 48px auto 0;
+      background: linear-gradient(90deg, transparent, rgba(212,175,55,0.4), transparent);
+    }
+    .progress-wrap {
+      position: relative;
+      z-index: 1;
+      margin-top: 32px;
+      width: 160px;
+      height: 2px;
+      background: rgba(255,255,255,0.04);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .progress-bar {
+      height: 100%;
+      width: 36%;
+      background: linear-gradient(90deg, rgba(212,175,55,0.85), rgba(212,175,55,0.3));
+      border-radius: 2px;
+      animation: prog 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    }
+    @keyframes prog {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(380%); }
+    }
+  </style>
+</head>
+<body>
+  <div class="brand">
+    <div class="brand-icon"><img src="./icon.png" alt="" /></div>
+    <div class="brand-title">听说在线</div>
+    <div class="brand-sub">Inspiration Gallery</div>
+  </div>
+  <div class="divider"></div>
+  <div class="progress-wrap">
+    <div class="progress-bar"></div>
+  </div>
+</body>
+</html>

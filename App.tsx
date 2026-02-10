@@ -3,7 +3,8 @@ import Header from './components/Header';
 import InputArea from './components/InputArea';
 import ResultCard from './components/ResultCard';
 import VideoMaker from './components/VideoMaker';
-import { generateCreativePrompts, generateImageFromPrompt, getLastImageGenDebugInfo } from './services/geminiService';
+import BatchPanel from './components/BatchPanel';
+import { generateCreativePrompts, generateImageFromPrompt, getLastImageGenDebugInfo, getLastGeneratedTitle } from './services/geminiService';
 import { checkProxyHealth, type ProxyHealthStatus } from './utils/proxyHealthCheck';
 import { GeneratedItem } from './types';
 
@@ -18,18 +19,21 @@ const App: React.FC = () => {
   const [items, setItems] = useState<GeneratedItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [lastInputText, setLastInputText] = useState('');
+  const [lastVideoTitle, setLastVideoTitle] = useState('');
   const [currentRatio, setCurrentRatio] = useState('4:3');
   const [currentStyle, setCurrentStyle] = useState('Photorealistic');
   const [currentView, setCurrentView] = useState('Default');
   const [proxyHealth, setProxyHealth] = useState<ProxyHealthStatus | null>(null);
   const [showProxyWarning, setShowProxyWarning] = useState(true);
+  const [showBatchPanel, setShowBatchPanel] = useState(false);
   const collectionRef = useRef<HTMLDivElement>(null);
   const videoProductionRef = useRef<HTMLDivElement>(null);
   const prevAllImagesReady = useRef(false);
   const prevPromptJustDone = useRef(false);
 
-  // Check proxy health on mount
+  // Check proxy health on mount（桌面版自带服务，跳过检查）
   useEffect(() => {
+    if (typeof window !== 'undefined' && (window as any).electronAPI?.isDesktop) return;
     checkProxyHealth().then(setProxyHealth);
   }, []);
 
@@ -55,6 +59,7 @@ const App: React.FC = () => {
     try {
       // Step 1: 一次 API 生成 N 个 prompt（优先），失败则回退并行
       const results = await generateCreativePrompts(inputText, style, count, viewDistance, reasoningEffort);
+      setLastVideoTitle(getLastGeneratedTitle());
 
       const newItems: GeneratedItem[] = results.map((r, index) => ({
         id: (index + 1).toString(),
@@ -151,24 +156,38 @@ const App: React.FC = () => {
     if (isProcessing) prevPromptJustDone.current = true;
   }, [items.length, isProcessing]);
 
-  // 图片全部生成完成 → 滚动到视频区
+  // 图片全部生成完成 → 滚动到视频区；桌面版发系统通知
   useEffect(() => {
     if (allImagesReady && !prevAllImagesReady.current) {
       prevAllImagesReady.current = true;
       setTimeout(() => {
         videoProductionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 200);
+      if (typeof window !== 'undefined' && (window as any).electronAPI?.showNotification) {
+        (window as any).electronAPI.showNotification('灵感画廊', `${items.length} 张图片已生成完成`);
+      }
     }
     if (!allImagesReady) prevAllImagesReady.current = false;
-  }, [allImagesReady]);
+  }, [allImagesReady, items.length]);
 
   return (
     <div className="min-h-screen text-slate-300 selection:bg-[#d4af37] selection:text-black">
       <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        <Header />
+        <div className="flex items-center justify-between mb-2">
+          <Header />
+          <button
+            onClick={() => setShowBatchPanel(true)}
+            className="flex items-center gap-2 px-4 py-2 text-sm border border-[#d4af37]/40 text-[#d4af37]/80 hover:text-[#d4af37] hover:border-[#d4af37]/70 hover:bg-[#d4af37]/5 rounded-lg transition-all"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+              <path fillRule="evenodd" d="M2 3.75A.75.75 0 012.75 3h14.5a.75.75 0 010 1.5H2.75A.75.75 0 012 3.75zm0 4.167a.75.75 0 01.75-.75h14.5a.75.75 0 010 1.5H2.75a.75.75 0 01-.75-.75zm0 4.166a.75.75 0 01.75-.75h14.5a.75.75 0 010 1.5H2.75a.75.75 0 01-.75-.75zm0 4.167a.75.75 0 01.75-.75h14.5a.75.75 0 010 1.5H2.75a.75.75 0 01-.75-.75z" clipRule="evenodd" />
+            </svg>
+            批量生成
+          </button>
+        </div>
 
-        {/* Proxy Health Warning Banner */}
-        {proxyHealth && !proxyHealth.isHealthy && showProxyWarning && (
+        {/* Proxy Health Warning Banner（桌面版自带服务，不显示） */}
+        {proxyHealth && !proxyHealth.isHealthy && showProxyWarning && !(typeof window !== 'undefined' && (window as any).electronAPI?.isDesktop) && (
           <div className="mb-6 bg-red-900/20 border border-red-500/50 rounded-lg p-4 animate-fade-in">
             <div className="flex items-start justify-between gap-4">
               <div className="flex-1">
@@ -238,12 +257,16 @@ const App: React.FC = () => {
                 originalText={lastInputText}
                 aspectRatio={currentRatio}
                 style={currentStyle}
+                videoTitle={lastVideoTitle}
               />
               </div>
             )}
           </div>
         )}
       </div>
+
+      {/* 批量生成面板 */}
+      {showBatchPanel && <BatchPanel onClose={() => setShowBatchPanel(false)} />}
     </div>
   );
 };

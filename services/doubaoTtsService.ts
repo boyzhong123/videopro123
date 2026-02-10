@@ -41,8 +41,16 @@ function isValidBase64(s: string): boolean {
   }
 }
 
-/** 从环境变量读取，Vite 仅暴露 VITE_ 前缀变量；未配置时请求会报 45000000 */
+/** 从环境变量或桌面版内置配置读取；未配置时请求会报 45000000 */
 function getDoubaoKey(): { accessKey: string; appId: string; bigttsInstanceId: string } {
+  const builtin = typeof window !== "undefined" && (window as any).__BUILTIN_ENV__;
+  if (builtin) {
+    return {
+      accessKey: ((builtin.VITE_DOUBAO_TTS_ACCESS_KEY as string) || "").trim(),
+      appId: ((builtin.VITE_DOUBAO_TTS_APP_ID as string) || "").trim(),
+      bigttsInstanceId: ((builtin.VITE_DOUBAO_TTS_BIGTTS_INSTANCE as string) || "").trim(),
+    };
+  }
   const env = typeof import.meta !== "undefined" ? (import.meta as any).env : {};
   return {
     accessKey: (env.VITE_DOUBAO_TTS_ACCESS_KEY || "").trim(),
@@ -241,17 +249,19 @@ async function fetchDoubaoTtsMp3(
   return combined.buffer;
 }
 
-async function decodeMp3ToPcm24k(mp3Buffer: ArrayBuffer): Promise<ArrayBuffer> {
+/** 将 MP3 ArrayBuffer 解码为 24kHz PCM Int16。可传入共享 AudioContext 避免反复创建 */
+async function decodeMp3ToPcm24k(mp3Buffer: ArrayBuffer, sharedCtx?: AudioContext): Promise<ArrayBuffer> {
   if (!mp3Buffer.byteLength) throw new Error("TTS 返回的音频为空");
-  const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+  const ownCtx = !sharedCtx;
+  const audioCtx = sharedCtx ?? new (window.AudioContext || (window as any).webkitAudioContext)();
   let audioBuffer: AudioBuffer;
   try {
     audioBuffer = await audioCtx.decodeAudioData(mp3Buffer.slice(0));
   } catch (e) {
-    audioCtx.close();
+    if (ownCtx) audioCtx.close();
     throw new Error("TTS 音频解码失败，请确认 API 返回为 MP3。");
   }
-  audioCtx.close();
+  if (ownCtx) audioCtx.close();
 
   const channel = audioBuffer.getChannelData(0);
   const sampleRate = audioBuffer.sampleRate;
@@ -305,4 +315,66 @@ export const generateSpeechDoubao = async (
   }
   ttsCache.set(key, pcm.slice(0));
   return pcm;
+};
+
+/**
+ * 批量并行合成：HTTP 请求并发（受 CONCURRENCY 限制），MP3 解码共享单个 AudioContext 顺序执行。
+ * 比逐句 Promise.all(generateSpeechDoubao(...)) 快得多，因为避免了同时创建 N 个 AudioContext。
+ */
+export const generateSpeechBatch = async (
+  sentences: string[],
+  speaker: string = DEFAULT_SPEAKER,
+  options?: DoubaoEmotionOptions
+): Promise<ArrayBuffer[]> => {
+  const CONCURRENCY = 5; // 同时最多 5 个 HTTP 请求，避免 API 限流
+
+  // 1. 先检查缓存，分出需要请求的索引
+  const results: (ArrayBuffer | null)[] = sentences.map(() => null);
+  const toFetch: { idx: number; text: string }[] = [];
+  for (let i = 0; i < sentences.length; i++) {
+    const key = getTtsCacheKey(sentences[i], speaker, options);
+    const cached = ttsCache.get(key);
+    if (cached) {
+      results[i] = cached.slice(0);
+    } else {
+      toFetch.push({ idx: i, text: sentences[i] });
+    }
+  }
+
+  if (toFetch.length === 0) return results as ArrayBuffer[];
+
+  // 2. 并发 HTTP 请求（带并发数限制），仅获取 MP3 原始数据
+  const mp3Results: { idx: number; mp3: ArrayBuffer }[] = [];
+  let cursor = 0;
+  while (cursor < toFetch.length) {
+    const batch = toFetch.slice(cursor, cursor + CONCURRENCY);
+    const batchMp3s = await Promise.all(
+      batch.map(async (item) => {
+        const mp3 = await fetchDoubaoTtsMp3(item.text, speaker, options);
+        return { idx: item.idx, mp3 };
+      })
+    );
+    mp3Results.push(...batchMp3s);
+    cursor += CONCURRENCY;
+  }
+
+  // 3. 共享单个 AudioContext 顺序解码，避免 N 个 AudioContext 同时创建导致浏览器卡顿
+  const decodeCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+  try {
+    for (const { idx, mp3 } of mp3Results) {
+      const pcm = await decodeMp3ToPcm24k(mp3, decodeCtx);
+      results[idx] = pcm;
+      // 写入缓存
+      const key = getTtsCacheKey(sentences[idx], speaker, options);
+      if (ttsCache.size >= TTS_CACHE_MAX) {
+        const firstKey = ttsCache.keys().next().value;
+        if (firstKey !== undefined) ttsCache.delete(firstKey);
+      }
+      ttsCache.set(key, pcm.slice(0));
+    }
+  } finally {
+    decodeCtx.close();
+  }
+
+  return results as ArrayBuffer[];
 };

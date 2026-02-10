@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { generateSpeech } from '../services/geminiService';
+import { generateSpeech, generateSpeechBatch } from '../services/geminiService';
 import { DOUBAO_SPEAKERS, DOUBAO_EMOTIONS, getLastTtsDebugInfo } from '../services/doubaoTtsService';
 import { GeneratedItem } from '../types';
 
@@ -8,6 +8,7 @@ interface VideoMakerProps {
   originalText: string;
   aspectRatio: string;
   style: string;
+  videoTitle?: string;
 }
 
 const SPEEDS = Array.from({ length: 13 }, (_, i) => {
@@ -80,7 +81,7 @@ interface TimedSubtitle {
   end: number;
 }
 
-const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRatio, style }) => {
+const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRatio, style, videoTitle }) => {
   const [status, setStatus] = useState<'idle' | 'generating_audio' | 'rendering' | 'finalizing' | 'done'>('idle');
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoMimeType, setVideoMimeType] = useState<string>('');
@@ -115,8 +116,91 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
   };
   const musicCache = useRef<Map<string, string>>(new Map());
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  /** 桌面端导出 MP4 时使用：保存最后一次生成的 WebM Blob */
+  const lastVideoBlobRef = useRef<Blob | null>(null);
+  /** 视频生成时已知的总时长（秒），WebM blob 的 video.duration 常为 Infinity，需要这个作后备 */
+  const knownDurationRef = useRef<number>(0);
+  const [exportMp4Loading, setExportMp4Loading] = useState(false);
+  const [exportMp4Progress, setExportMp4Progress] = useState<number | null>(null);
+  const previewVideoRef = useRef<HTMLVideoElement>(null);
+  const [previewProgress, setPreviewProgress] = useState({ current: 0, duration: 0 });
+  /** 缓存上一次的播放进度，避免下载/导出等重渲染后进度条显示为 0 或消失 */
+  const lastPreviewProgressRef = useRef({ current: 0, duration: 0 });
+  const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+  const [downloadWebmProgress, setDownloadWebmProgress] = useState<number | null>(null);
+
+  const isDesktop = typeof window !== 'undefined' && (window as any).electronAPI?.isDesktop;
 
   const validImages = images.filter(img => img.imageUrl && !img.loading && !img.error);
+
+  // 预览视频进度条与播放状态
+  useEffect(() => {
+    if (!videoUrl) return;
+    const known = knownDurationRef.current;
+    const reset = { current: 0, duration: known > 0 ? known : 0 };
+    setPreviewProgress(reset);
+    lastPreviewProgressRef.current = reset;
+    setIsPreviewPlaying(false);
+    const video = previewVideoRef.current;
+    if (!video) return;
+
+    // Chromium WebM blob duration fix：seek 到极大值强制浏览器计算真实 duration
+    let fixingDuration = false;
+    const fixDuration = () => {
+      if (!Number.isFinite(video.duration) || video.duration <= 0) {
+        fixingDuration = true;
+        video.currentTime = 1e10;
+      }
+    };
+    const onSeeked = () => {
+      if (fixingDuration && video.currentTime > 1e9) {
+        video.currentTime = 0;
+      } else if (fixingDuration && video.currentTime <= 1) {
+        fixingDuration = false;
+        update();
+      } else if (!fixingDuration) {
+        // 用户手动 seek 后立即刷新进度条
+        update();
+      }
+    };
+    video.addEventListener('loadedmetadata', fixDuration);
+    video.addEventListener('seeked', onSeeked);
+    const update = () => {
+      if (fixingDuration) return; // 正在修 duration，跳过更新防止进度条跑满
+      const rawD = video.duration;
+      const c = video.currentTime;
+      // 优先使用生成时精确计算的时长（WebM blob 的 video.duration 在 Chromium 中不可靠）
+      const knownD = knownDurationRef.current;
+      const d = knownD > 0 ? knownD : ((Number.isFinite(rawD) && rawD > 0) ? rawD : 0);
+      const next = { current: Number.isFinite(c) ? c : 0, duration: d };
+      lastPreviewProgressRef.current = next;
+      setPreviewProgress(next);
+    };
+    const onPlay = () => setIsPreviewPlaying(true);
+    const onPause = () => setIsPreviewPlaying(false);
+    const onEnded = () => setIsPreviewPlaying(false);
+    video.addEventListener('timeupdate', update);
+    video.addEventListener('loadedmetadata', update);
+    video.addEventListener('durationchange', update);
+    video.addEventListener('loadeddata', update);
+    video.addEventListener('canplay', update);
+    video.addEventListener('play', onPlay);
+    video.addEventListener('pause', onPause);
+    video.addEventListener('ended', onEnded);
+    update();
+    return () => {
+      video.removeEventListener('timeupdate', update);
+      video.removeEventListener('loadedmetadata', update);
+      video.removeEventListener('loadedmetadata', fixDuration);
+      video.removeEventListener('durationchange', update);
+      video.removeEventListener('loadeddata', update);
+      video.removeEventListener('canplay', update);
+      video.removeEventListener('play', onPlay);
+      video.removeEventListener('pause', onPause);
+      video.removeEventListener('ended', onEnded);
+      video.removeEventListener('seeked', onSeeked);
+    };
+  }, [videoUrl]);
 
   // 不再根据 style 自动覆盖 BGM，保持默认「古典钢琴叙事」生效
 
@@ -348,6 +432,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
 
     setStatus('generating_audio');
     setVideoUrl(null);
+    lastVideoBlobRef.current = null;
     setVideoMimeType('');
     setProgress(0);
     setLastErrorDetail(null);
@@ -371,16 +456,16 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       const PAUSE_BETWEEN_SENTENCES = 0.35; // 句间静音 0.35 秒
 
       // 1. 按句合成音频，得到每句的 PCM 和实际时长
-      const segmentBuffers: ArrayBuffer[] = fastAudioMode
-        ? await Promise.all(
-          sentences.map((sentence) => generateSpeech(sentence, selectedSpeaker, speechOptions))
-        )
-        : [];
-      if (!fastAudioMode) {
+      let segmentBuffers: ArrayBuffer[];
+      if (fastAudioMode) {
+        // 极速模式：HTTP 请求并发 + 共享 AudioContext 顺序解码，比 Promise.all(generateSpeech) 快得多
+        segmentBuffers = await generateSpeechBatch(sentences, selectedSpeaker, speechOptions);
+      } else {
+        // 顺序模式：逐句合成
+        segmentBuffers = [];
         for (let i = 0; i < sentences.length; i++) {
           const buf = await generateSpeech(sentences[i], selectedSpeaker, speechOptions);
           segmentBuffers.push(buf);
-          // 延时已移除 (User request: concurrency limit is high enough)
         }
       }
       const segmentDurations: number[] = segmentBuffers.map((buf) => (buf.byteLength / 2) / SAMPLE_RATE);
@@ -514,10 +599,10 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       canvas.width = dims.width;
       canvas.height = dims.height;
 
-      // 流畅优先（低配勾选/多图自动降级）：预渲染与码率降低
+      // 流畅优先（低配勾选/多图自动降级）：桌面版资源更宽裕，放宽阈值
       const imgCount = validBlobs.length;
-      // 6张及以上自动降级，进一步降低预渲染尺寸
-      const autoLowSpec = lowSpecMode || imgCount >= 6;
+      const lowSpecThreshold = isDesktop ? 8 : 6;
+      const autoLowSpec = lowSpecMode || imgCount >= lowSpecThreshold;
       const MAX_SOURCE_SIZE = autoLowSpec ? 800 : 1280;
       const MAX_SCALE = 1.15;
       const MAX_PRE_SIZE = autoLowSpec ? 1600 : 2560;
@@ -601,17 +686,62 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       ctx.textBaseline = 'middle';
       const precomputedSubtitleLines: string[][] = timedSubtitles.map(s => wrapText(ctx, s.text.trim(), subtitleMaxWidth));
 
-      const canvasStream = canvas.captureStream(autoLowSpec ? 24 : 30);
+      // 预热字幕缓存：在渲染循环前就创建好 Canvas 并绘制第一帧字幕，避免字幕首次出现时掉帧
+      const lineHeight = subtitleFontSize * 1.35;
+      const boxPadding = subtitleFontSize * 0.7;
+      const firstLines = precomputedSubtitleLines.find(l => l.length > 0);
+      let subtitleCache: HTMLCanvasElement | null = null;
+      let lastSubtitleKey = '';
+      let lastSubtitleBox = { bx: 0, by: 0, boxWidth: 0, boxHeight: 0 };
+      if (firstLines && firstLines.length > 0) {
+        const warmTotalH = firstLines.length * lineHeight;
+        const warmBoxH = warmTotalH + boxPadding * 2;
+        const warmBoxW = subtitleMaxWidth + boxPadding * 2;
+        subtitleCache = document.createElement('canvas');
+        subtitleCache.width = warmBoxW;
+        subtitleCache.height = warmBoxH;
+        const sctx = subtitleCache.getContext('2d', { alpha: true, willReadFrequently: false })!;
+        sctx.font = `bold ${subtitleFontSize}px "Noto Sans SC", sans-serif`;
+        sctx.textAlign = 'center';
+        sctx.textBaseline = 'middle';
+        sctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+        fillRoundRect(sctx, 0, 0, warmBoxW, warmBoxH, 12);
+        const textOffsets: [number, number][] = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+        sctx.fillStyle = 'rgba(0,0,0,0.85)';
+        firstLines.forEach((line, i) => {
+          const cy = boxPadding + (i + 0.5) * lineHeight;
+          textOffsets.forEach(([dx, dy]) => sctx.fillText(line, warmBoxW / 2 + dx, cy + dy));
+        });
+        sctx.fillStyle = '#ffffff';
+        firstLines.forEach((line, i) => {
+          const cy = boxPadding + (i + 0.5) * lineHeight;
+          sctx.fillText(line, warmBoxW / 2, cy);
+        });
+        lastSubtitleKey = '0'; // 标记第一帧已渲染
+        lastSubtitleBox = {
+          bx: (canvas.width - warmBoxW) / 2,
+          by: (canvas.height - canvas.height * 0.11) - warmBoxH / 2,
+          boxWidth: warmBoxW,
+          boxHeight: warmBoxH,
+        };
+      }
+
+      const captureFps = autoLowSpec && !isDesktop ? 24 : 30;
+      const canvasStream = canvas.captureStream(captureFps);
       stream = new MediaStream([
         ...canvasStream.getVideoTracks(),
         ...dest.stream.getAudioTracks()
       ]);
 
-      const mimeType = 'video/webm; codecs=vp9,opus'; // Prefer WebM for browser recording stability
+      // VP8 比 VP9 编码轻量得多，实时录制不易掉帧；桌面端码率适当提高补偿画质
+      const preferVp8 = 'video/webm; codecs=vp8,opus';
+      const preferVp9 = 'video/webm; codecs=vp9,opus';
+      const mimeType = MediaRecorder.isTypeSupported(preferVp8) ? preferVp8 : preferVp9;
 
+      const bitsPerSecond = autoLowSpec ? (isDesktop ? 4000000 : 2500000) : (isDesktop ? 6000000 : 4000000);
       mediaRecorder = new MediaRecorder(stream, {
         mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'video/webm',
-        videoBitsPerSecond: autoLowSpec ? 2500000 : 4000000 // 多图时降到 2.5Mbps
+        videoBitsPerSecond: bitsPerSecond
       });
 
       const chunks: Blob[] = [];
@@ -621,10 +751,6 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
 
       const bgmRequestedButFailed = selectedMusic !== 'none' && !musicAudioBuffer;
       let lastProgressUpdate = 0;
-      // 字幕缓存：仅在当前显示的字幕内容变化时重绘，每帧只 drawImage 一次，减轻卡顿
-      let subtitleCache: HTMLCanvasElement | null = null;
-      let lastSubtitleKey = '';
-      let lastSubtitleBox = { bx: 0, by: 0, boxWidth: 0, boxHeight: 0 };
       mediaRecorder.onstop = () => {
         if (voiceSource) { try { voiceSource.stop(); voiceSource.disconnect(); } catch (e) { } }
         if (musicSource) { try { musicSource.stop(); musicSource.disconnect(); } catch (e) { } }
@@ -632,10 +758,15 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
         audioCtx?.close();
 
         const blob = new Blob(chunks, { type: mimeType });
+        lastVideoBlobRef.current = blob;
+        knownDurationRef.current = totalDuration;
         const url = URL.createObjectURL(blob);
         setVideoUrl(url);
         setVideoMimeType(mimeType);
         setStatus('done');
+        if (typeof window !== 'undefined' && (window as any).electronAPI?.showNotification) {
+          (window as any).electronAPI.showNotification('灵感画廊', '视频已生成完成');
+        }
         if (bgmRequestedButFailed) {
           setToastMessage('背景音未加载，视频仅含人声。请从 Pixabay 中文等下载 MP3 放入 public/bgm/。');
           if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -653,9 +784,18 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       voiceSource.start(startTime + INTRO_PADDING);
       if (musicSource) musicSource.start(startTime);
 
-      // 流畅优先或 4 张以上用 24fps；requestAnimationFrame 按实际刷新率跑，不堆积
-      const RENDER_FPS = autoLowSpec || preRendered.length >= 4 ? 24 : 30;
-      const renderLoop = () => {
+      // 帧率限制：只按 captureStream 的帧率渲染，避免 60fps 屏幕上做 30 帧无用 canvas 重绘
+      const RENDER_INTERVAL = 1000 / captureFps;
+      let lastFrameTime = 0;
+      const textOffsets: [number, number][] = [[-1, 0], [1, 0], [0, -1], [0, 1]]; // 预创建，避免每帧分配
+      const renderLoop = (timestamp?: number) => {
+        // 帧率限流：距上一帧不足 RENDER_INTERVAL 就跳过
+        if (timestamp && lastFrameTime && (timestamp - lastFrameTime) < RENDER_INTERVAL * 0.9) {
+          renderTimerId = requestAnimationFrame(renderLoop);
+          return;
+        }
+        lastFrameTime = timestamp || performance.now();
+
         const currentTime = audioCtx!.currentTime;
         const elapsed = currentTime - startTime;
 
@@ -723,8 +863,6 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
             })
             : [];
           if (activeSubtitles.length > 0) {
-            const lineHeight = subtitleFontSize * 1.35;
-            const boxPadding = subtitleFontSize * 0.7;
             const allLines = activeSubtitles.flatMap(sub => {
               const i = timedSubtitles.indexOf(sub);
               return (i >= 0 && precomputedSubtitleLines[i]?.length) ? precomputedSubtitleLines[i] : [];
@@ -737,7 +875,6 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
               const boxWidth = subtitleMaxWidth + boxPadding * 2;
               const bx = (canvas.width - boxWidth) / 2;
               const r = 12;
-              const textBlockTop = by + boxPadding;
               const subtitleKey = activeSubtitles.map(s => timedSubtitles.indexOf(s)).join(',');
 
               if (subtitleKey !== lastSubtitleKey) {
@@ -753,7 +890,6 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
                 sctx.textBaseline = 'middle';
                 sctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
                 fillRoundRect(sctx, 0, 0, boxWidth, boxHeight, r);
-                const textOffsets: [number, number][] = [[-1, 0], [1, 0], [0, -1], [0, 1]];
                 sctx.fillStyle = 'rgba(0,0,0,0.85)';
                 allLines.forEach((line, i) => {
                   const lineCenterY = boxPadding + (i + 0.5) * lineHeight;
@@ -783,7 +919,7 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
         renderTimerId = requestAnimationFrame(renderLoop);
       };
 
-      renderLoop(); // 立即画一帧
+      renderLoop(performance.now()); // 立即画一帧，传入初始时间戳
 
     } catch (error) {
       console.error("Video creation failed", error);
@@ -805,6 +941,91 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
       alert("视频合成遇到问题，请重试。\n\n" + hint);
       if (audioCtx) audioCtx.close();
       if (typeof renderTimerId !== 'undefined') cancelAnimationFrame(renderTimerId);
+    }
+  };
+
+  /** 下载视频文件：桌面版走原生保存对话框（记忆目录），网页版走浏览器下载 */
+  const handleDownloadWebm = async () => {
+    if (!videoUrl || downloadWebmProgress !== null) return;
+    const blob = lastVideoBlobRef.current;
+    const ext = videoMimeType.includes('mp4') ? '.mp4' : '.webm';
+    const titlePart = videoTitle || `灵感画廊_${Date.now()}`;
+    const defaultName = `${titlePart}${ext}`;
+    const api = (window as any).electronAPI;
+
+    if (api?.saveVideoFile && blob) {
+      // 桌面版：原生保存对话框，记忆目录
+      setDownloadWebmProgress(0);
+      try {
+        const arrayBuffer = await blob.arrayBuffer();
+        setDownloadWebmProgress(30);
+        const result = await api.saveVideoFile(arrayBuffer, defaultName);
+        setDownloadWebmProgress(100);
+        if ((result as any).canceled) {
+          setToastMessage('已取消');
+        } else if ((result as any).error) {
+          setToastMessage('保存失败: ' + (result as any).error);
+        } else {
+          setToastMessage('已保存: ' + (result as any).path);
+        }
+        if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = setTimeout(() => { setToastMessage(null); toastTimerRef.current = null; }, 3000);
+      } catch (e) {
+        setToastMessage('保存失败: ' + (e instanceof Error ? e.message : String(e)));
+        if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = setTimeout(() => { setToastMessage(null); toastTimerRef.current = null; }, 3000);
+      } finally {
+        setTimeout(() => setDownloadWebmProgress(null), 400);
+      }
+    } else {
+      // 网页版：浏览器下载
+      setDownloadWebmProgress(0);
+      const link = document.createElement('a');
+      link.href = videoUrl;
+      link.download = defaultName;
+      link.click();
+      const start = Date.now();
+      const animDur = 600;
+      const tick = () => {
+        const elapsed = Date.now() - start;
+        const pct = Math.min(100, (elapsed / animDur) * 100);
+        setDownloadWebmProgress(pct);
+        if (pct < 100) requestAnimationFrame(tick);
+        else setTimeout(() => setDownloadWebmProgress(null), 300);
+      };
+      requestAnimationFrame(tick);
+    }
+  };
+
+  const handleExportMp4 = async () => {
+    const blob = lastVideoBlobRef.current;
+    const api = (window as any).electronAPI;
+    if (!blob || !api?.exportVideoAsMp4) return;
+    setExportMp4Loading(true);
+    setExportMp4Progress(0);
+    const duration = previewProgress.duration > 0 ? previewProgress.duration : (knownDurationRef.current > 0 ? knownDurationRef.current : undefined);
+    const unsub = api.onExportMp4Progress?.( (p: number) => setExportMp4Progress(p) );
+    try {
+      const arrayBuffer = await blob.arrayBuffer();
+      const mp4Name = `${videoTitle || `灵感画廊_${Date.now()}`}.mp4`;
+      const result = await api.exportVideoAsMp4(arrayBuffer, duration, mp4Name);
+      if ((result as any).canceled) {
+        setToastMessage('已取消');
+      } else if ((result as any).error) {
+        setToastMessage('MP4 导出失败: ' + (result as any).error);
+      } else {
+        setToastMessage('已保存 MP4: ' + (result as any).path);
+      }
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = setTimeout(() => { setToastMessage(null); toastTimerRef.current = null; }, 3000);
+    } catch (e) {
+      setToastMessage('导出失败: ' + (e instanceof Error ? e.message : String(e)));
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = setTimeout(() => { setToastMessage(null); toastTimerRef.current = null; }, 3000);
+    } finally {
+      setExportMp4Loading(false);
+      setExportMp4Progress(null);
+      if (typeof unsub === 'function') unsub();
     }
   };
 
@@ -1052,23 +1273,76 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
           )}
 
           {status === 'done' && videoUrl && (
-            <div className="flex flex-col xs:flex-row items-center gap-3 md:gap-5 w-full xs:w-auto">
-              <a
-                href={videoUrl}
-                download={`gemini_gallery_${aspectRatio.replace(':', '-')}${videoMimeType.includes('mp4') ? '.mp4' : '.webm'}`}
-                className="group bg-gradient-to-r from-[#d4af37] to-[#c9a227] hover:from-[#e5c04a] hover:to-[#d4af37] text-black px-6 md:px-10 py-3 md:py-3.5 rounded-lg font-serif italic text-base md:text-xl transition-all flex items-center justify-center gap-2 md:gap-3 shadow-[0_4px_20px_0_rgba(212,175,55,0.3)] hover:shadow-[0_6px_30px_0_rgba(212,175,55,0.4)] w-full xs:w-auto"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 md:w-6 md:h-6 group-hover:translate-y-0.5 transition-transform">
-                  <path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z" />
-                  <path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z" />
-                </svg>
-                Download Film
-              </a>
+            <div className="flex flex-col xs:flex-row items-center gap-3 md:gap-5 w-full xs:w-auto flex-wrap">
+              <div className="flex flex-col gap-2 w-full xs:w-auto">
+                <button
+                  type="button"
+                  onClick={handleDownloadWebm}
+                  disabled={downloadWebmProgress !== null}
+                  className="group bg-gradient-to-r from-[#d4af37] to-[#c9a227] hover:from-[#e5c04a] hover:to-[#d4af37] disabled:opacity-80 text-black px-6 md:px-10 py-3 md:py-3.5 rounded-lg font-serif italic text-base md:text-xl transition-all flex items-center justify-center gap-2 md:gap-3 shadow-[0_4px_20px_0_rgba(212,175,55,0.3)] hover:shadow-[0_6px_30px_0_rgba(212,175,55,0.4)] w-full xs:w-auto"
+                >
+                  {downloadWebmProgress !== null ? (
+                    <span className="w-5 h-5 border-2 border-black border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <>
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5 md:w-6 md:h-6 group-hover:translate-y-0.5 transition-transform">
+                        <path fillRule="evenodd" d="M19.5 21a3 3 0 003-3V9a3 3 0 00-3-3h-1.246a.75.75 0 01-.573-.268l-1.394-1.63A2.25 2.25 0 0014.574 3H9.426a2.25 2.25 0 00-1.713.802L6.319 5.432a.75.75 0 01-.573.268H4.5a3 3 0 00-3 3v9a3 3 0 003 3h15zM12 10.5a3.75 3.75 0 100 7.5 3.75 3.75 0 000-7.5zm-1.5 3.75a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0z" clipRule="evenodd" />
+                      </svg>
+                      下载视频
+                    </>
+                  )}
+                </button>
+                {downloadWebmProgress !== null && (
+                  <div className="w-full min-w-[160px] rounded-lg bg-[#111] border border-[#2a2a2a] px-3 py-2">
+                    <div className="text-[10px] text-[#d4af37]/90 uppercase tracking-wider mb-1.5">下载 WebM</div>
+                    <div className="w-full h-2 bg-[#1a1a1a] rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-[#d4af37] transition-all duration-200 rounded-full"
+                        style={{ width: `${downloadWebmProgress}%` }}
+                      />
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-1 tabular-nums">{Math.round(downloadWebmProgress)}%</div>
+                  </div>
+                )}
+              </div>
+              {isDesktop && (
+                <div className="flex flex-col gap-2 w-full xs:w-auto">
+                  <button
+                    type="button"
+                    onClick={handleExportMp4}
+                    disabled={exportMp4Loading}
+                    className="group bg-gradient-to-r from-emerald-600 to-emerald-700 hover:from-emerald-500 hover:to-emerald-600 disabled:opacity-60 text-white px-6 md:px-10 py-3 md:py-3.5 rounded-lg font-serif italic text-base md:text-xl transition-all flex items-center justify-center gap-2 md:gap-3 shadow-[0_4px_20px_0_rgba(16,185,129,0.3)] w-full xs:w-auto"
+                  >
+                    {exportMp4Loading ? (
+                      <span className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <>
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5 md:w-6 md:h-6">
+                          <path fillRule="evenodd" d="M4.5 3.75a3 3 0 00-3 3v10.5a3 3 0 003 3h15a3 3 0 003-3V6.75a3 3 0 00-3-3h-15zm9 4.5a.75.75 0 00-1.28-.53l-3 3a.75.75 0 000 1.06l3 3a.75.75 0 001.28-.53v-1.5h2.25a.75.75 0 000-1.5H13.5v-1.5z" clipRule="evenodd" />
+                        </svg>
+                        导出 MP4
+                      </>
+                    )}
+                  </button>
+                  {exportMp4Loading && (
+                    <div className="w-full min-w-[160px] rounded-lg bg-[#0d1f0d] border border-emerald-900/50 px-3 py-2">
+                      <div className="text-[10px] text-emerald-400/90 uppercase tracking-wider mb-1.5">导出 MP4 中</div>
+                      <div className="w-full h-2 bg-[#1a1a1a] rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-emerald-500 transition-all duration-300 rounded-full"
+                          style={{ width: `${exportMp4Progress ?? 0}%` }}
+                        />
+                      </div>
+                      <div className="text-[10px] text-slate-500 mt-1 tabular-nums">{exportMp4Progress ?? 0}%</div>
+                    </div>
+                  )}
+                </div>
+              )}
               <button
                 onClick={() => setStatus('idle')}
                 className="text-slate-500 hover:text-slate-200 px-5 md:px-6 py-2.5 md:py-3 text-xs md:text-sm uppercase tracking-widest border border-slate-600/30 hover:border-slate-400/50 rounded-lg w-full xs:w-auto transition-all hover:bg-slate-800/30"
               >
-                Reset
+                重新生成
               </button>
             </div>
           )}
@@ -1080,18 +1354,107 @@ const VideoMaker: React.FC<VideoMakerProps> = ({ images, originalText, aspectRat
         <canvas ref={canvasRef} />
       </div>
 
-      {/* Preview Player */}
-      {status === 'done' && videoUrl && (
-        <div className="mt-8 md:mt-12 space-y-3 md:space-y-4">
+      {/* Preview Player：仅保留一条自定义进度条，用缓存避免下载/导出后重渲染导致进度条消失 */}
+      {status === 'done' && videoUrl && (() => {
+        const cached = lastPreviewProgressRef.current;
+        const displayProgress = previewProgress.duration > 0 ? previewProgress : (cached.duration > 0 ? cached : { current: 0, duration: 0 });
+        return (
+        <div className="mt-8 md:mt-12 space-y-3 md:space-y-4" key="preview-player">
           <div className="overflow-hidden border border-[#252525] md:border-[#2a2a2a] bg-black w-full max-w-3xl mx-auto shadow-2xl rounded-lg md:rounded-xl ring-1 ring-white/5">
-            <video controls src={videoUrl} className="w-full h-auto block" playsInline style={{ imageRendering: 'auto', transform: 'translateZ(0)' }} />
+            <div
+              className="relative group cursor-pointer"
+              onClick={() => {
+                const v = previewVideoRef.current;
+                if (!v) return;
+                v.paused ? v.play() : v.pause();
+              }}
+            >
+              <video
+                ref={previewVideoRef}
+                src={videoUrl}
+                className="w-full h-auto block"
+                playsInline
+                style={{ imageRendering: 'auto', transform: 'translateZ(0)' }}
+              />
+              {/* 半透明播放/暂停按钮叠加层 */}
+              <div className={`absolute inset-0 flex items-center justify-center transition-opacity duration-300 ${isPreviewPlaying ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
+                <div className="w-16 h-16 md:w-20 md:h-20 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center border border-white/10">
+                  {isPreviewPlaying ? (
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" className="w-8 h-8 md:w-10 md:h-10 opacity-90">
+                      <path fillRule="evenodd" d="M6.75 5.25a.75.75 0 01.75-.75H9a.75.75 0 01.75.75v13.5a.75.75 0 01-.75.75H7.5a.75.75 0 01-.75-.75V5.25zm7.5 0A.75.75 0 0115 4.5h1.5a.75.75 0 01.75.75v13.5a.75.75 0 01-.75.75H15a.75.75 0 01-.75-.75V5.25z" clipRule="evenodd" />
+                    </svg>
+                  ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" className="w-8 h-8 md:w-10 md:h-10 opacity-90 ml-1">
+                      <path fillRule="evenodd" d="M4.5 5.653c0-1.426 1.529-2.33 2.779-1.643l11.54 6.348c1.295.712 1.295 2.573 0 3.285L7.28 19.991c-1.25.687-2.779-.217-2.779-1.643V5.653z" clipRule="evenodd" />
+                    </svg>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 px-2 py-2 bg-[#0d0d0d] border-t border-[#252525]">
+              <button
+                type="button"
+                onClick={() => {
+                  const v = previewVideoRef.current;
+                  if (!v) return;
+                  v.paused ? v.play() : v.pause();
+                }}
+                className="p-1.5 text-[#d4af37] hover:bg-[#d4af37]/10 rounded transition-colors"
+                aria-label="播放/暂停"
+              >
+                {isPreviewPlaying ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                    <path fillRule="evenodd" d="M6.75 5.25a.75.75 0 01.75-.75H9a.75.75 0 01.75.75v13.5a.75.75 0 01-.75.75H7.5a.75.75 0 01-.75-.75V5.25zm7.5 0A.75.75 0 0115 4.5h1.5a.75.75 0 01.75.75v13.5a.75.75 0 01-.75.75H15a.75.75 0 01-.75-.75V5.25z" clipRule="evenodd" />
+                  </svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                    <path fillRule="evenodd" d="M4.5 5.653c0-1.426 1.529-2.33 2.779-1.643l11.54 6.348c1.295.712 1.295 2.573 0 3.285L7.28 19.991c-1.25.687-2.779-.217-2.779-1.643V5.653z" clipRule="evenodd" />
+                  </svg>
+                )}
+              </button>
+              <div
+                className="flex-1 min-w-0 h-2 bg-[#1a1a1a] cursor-pointer group rounded-full overflow-hidden flex items-center"
+                role="progressbar"
+                aria-valuenow={displayProgress.duration ? (displayProgress.current / displayProgress.duration) * 100 : 0}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                onClick={(e) => {
+                  const el = e.currentTarget;
+                  const video = previewVideoRef.current;
+                  if (!video || !displayProgress.duration) return;
+                  const x = e.clientX - el.getBoundingClientRect().left;
+                  const pct = Math.max(0, Math.min(1, x / el.offsetWidth));
+                  const wasPlaying = !video.paused;
+                  video.currentTime = pct * displayProgress.duration;
+                  // WebM blob seek 后 Chromium 可能卡住，强制恢复播放
+                  if (wasPlaying) {
+                    video.play().catch(() => {});
+                  }
+                }}
+              >
+                <div
+                  className="h-full min-w-[2px] bg-[#d4af37] transition-all duration-150 ease-out rounded-full group-hover:bg-[#e5c04a]"
+                  style={{ width: displayProgress.duration ? `${(displayProgress.current / displayProgress.duration) * 100}%` : '0%' }}
+                />
+              </div>
+              <span className="text-[10px] text-slate-500 tabular-nums w-20 shrink-0 text-right">
+                {displayProgress.duration > 0
+                  ? `${Math.floor(displayProgress.current / 60)}:${String(Math.floor(displayProgress.current % 60)).padStart(2, '0')} / ${Math.floor(displayProgress.duration / 60)}:${String(Math.floor(displayProgress.duration % 60)).padStart(2, '0')}`
+                  : '--:-- / --:--'}
+              </span>
+            </div>
           </div>
           <p className="text-slate-500 md:text-slate-400 text-[10px] md:text-xs max-w-2xl mx-auto text-center px-4 md:px-0 leading-relaxed">
-            Chrome / Edge 仅支持导出 WebM。如需 MP4：用 Safari 可尝试直接录制，或下载后用 ffmpeg 转换：
-            <code className="bg-[#1a1a1a] md:bg-[#181818] px-1.5 py-0.5 rounded text-[10px] md:text-xs text-slate-400 md:text-[#d4af37]/60 ml-1">ffmpeg -i 文件.webm -c copy 文件.mp4</code>
+            {isDesktop
+              ? '桌面版支持直接「导出 MP4」；也可下载 WebM。'
+              : 'Chrome / Edge 仅支持导出 WebM。如需 MP4：用 Safari 可尝试直接录制，或下载后用 ffmpeg 转换：'}
+            {!isDesktop && (
+              <code className="bg-[#1a1a1a] md:bg-[#181818] px-1.5 py-0.5 rounded text-[10px] md:text-xs text-slate-400 md:text-[#d4af37]/60 ml-1">ffmpeg -i 文件.webm -c copy 文件.mp4</code>
+            )}
           </p>
         </div>
-      )}
+        );
+      })()}
 
       {/* Toast：生成后点击语音/倍速/BGM 时提示 */}
       {toastMessage && (

@@ -1,14 +1,21 @@
 {
-  "name": "听说在线-灵感画廊",
+  "name": "tingshuo-gallery",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.1.0",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "start": "node server.js",
     "serve": "npm run build && npm start",
+    "secrets:encrypt": "node scripts/encrypt-secrets.mjs",
+    "icons:copy": "node -e \"const fs=require('fs');const p='build/icon.png';const o='electron/icon.png';try{fs.copyFileSync(p,o);console.log('Copied icon to electron/');}catch(e){}\"",
+    "electron:dev": "npm run icons:copy && vite build --base=./ && electron .",
+    "electron:build": "npm run icons:copy && npm run secrets:encrypt && vite build --base=./ && electron-builder",
+    "electron:build:mac": "npm run icons:copy && npm run secrets:encrypt && vite build --base=./ && electron-builder --mac",
+    "electron:build:win": "npm run icons:copy && npm run secrets:encrypt && vite build --base=./ && electron-builder --win",
     "test:proxy": "node scripts/test-proxy.js",
     "test:image": "node scripts/test-image-gen.js",
     "diagnose": "node scripts/test-proxy.js"
@@ -16,13 +23,59 @@
   "dependencies": {
     "@google/genai": "^1.39.0",
     "express": "^4.21.0",
-    "react-dom": "^19.2.4",
-    "react": "^19.2.4"
+    "ffmpeg-static": "^5.2.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "to-ico": "^1.1.5",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
+  },
+  "build": {
+    "appId": "com.tingshuo.gallery",
+    "productName": "听说在线-灵感画廊",
+    "publish": null,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "ffmpeg-bin/${os}/",
+        "to": "ffmpeg-bin",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.entertainment",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }

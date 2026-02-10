@@ -24,6 +24,21 @@ View your app in AI Studio: https://ai.studio/apps/drive/1ygQms5_D4WY0DzxMviPP5h
 - **本地开发**：Vite 已内置 `/api/proxy` 中间件，请求会由本机转发到豆包/火山，无需 corsproxy.io。
 - **生产部署**：若部署到 Vercel，将项目根目录的 `api/` 一起部署即可提供 `/api/proxy`，同样无需第三方代理。若部署到其他平台，可自建一个转发到豆包/火山的接口，并在环境变量中设置 `VITE_CORS_PROXY` 指向该接口（如 `https://你的域名/api/proxy?url=`）。
 
+## 桌面版（Electron）打包与分发
+
+- **打包命令**  
+  - Mac：`npm run electron:build:mac` → 在 `release/` 下生成 `.dmg`、`.zip`。  
+  - Windows：在 Windows 电脑上执行 `npm run electron:build:win` → 在 `release/` 下生成安装包 `.exe`。
+
+- **图标**  
+  - 应用图标位于 `build/icon.icns`（Mac）、`build/icon.ico`（Windows）。  
+  - 若需重新生成 Windows 图标：`node scripts/make-icon-ico.mjs`（需已存在 `build/icon.png`）。
+
+- **分发给他人使用**  
+  - **可以**把打好的安装包（Mac 的 `.dmg`/解压后的 app，或 Windows 的安装程序）直接发给任何人使用。  
+  - 对方**不需要**安装 Node、npm 或配置环境变量；安装后双击即可运行。  
+  - 注意：使用前对方需在应用内或本机配置自己的 API Key（如火山/豆包等），否则图片生成、TTS 等功能无法使用。安装包本身不包含你的 Key，可放心分发。
+
 ## 故障排查
 
 ### 快速诊断工具
